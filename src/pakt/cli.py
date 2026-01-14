@@ -196,5 +196,22 @@ def clear_cache():
     console.print(f"Remaining: {stats}")
 
 
+@main.command()
+@click.option("--host", default="127.0.0.1", help="Host to bind to")
+@click.option("--port", default=8080, help="Port to bind to")
+def serve(host: str, port: int):
+    """Start the web interface."""
+    import uvicorn
+
+    from pakt.web import create_app
+
+    console.print(f"[bold]Starting Pakt web interface...[/]")
+    console.print(f"Open [cyan]http://{host}:{port}[/] in your browser")
+    console.print("[dim]Press Ctrl+C to stop[/]\n")
+
+    app = create_app()
+    uvicorn.run(app, host=host, port=port, log_level="warning")
+
+
 if __name__ == "__main__":
     main()

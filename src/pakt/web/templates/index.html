@@ -1,0 +1,640 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Pakt - Plex/Trakt Sync</title>
+    <style>
+        :root {
+            --bg: #1a1a2e;
+            --bg-card: #16213e;
+            --accent: #e94560;
+            --text: #eee;
+            --text-dim: #888;
+            --success: #4ade80;
+            --warning: #fbbf24;
+            --error: #ef4444;
+        }
+
+        * {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 2rem;
+        }
+
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+        }
+
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 2rem;
+        }
+
+        h1 {
+            font-size: 2rem;
+            font-weight: 600;
+        }
+
+        h1 span {
+            color: var(--accent);
+        }
+
+        .status-badge {
+            padding: 0.5rem 1rem;
+            border-radius: 2rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+        }
+
+        .status-badge.ok {
+            background: rgba(74, 222, 128, 0.2);
+            color: var(--success);
+        }
+
+        .status-badge.error {
+            background: rgba(239, 68, 68, 0.2);
+            color: var(--error);
+        }
+
+        .status-badge.running {
+            background: rgba(251, 191, 36, 0.2);
+            color: var(--warning);
+        }
+
+        .grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1.5rem;
+        }
+
+        .card {
+            background: var(--bg-card);
+            border-radius: 1rem;
+            padding: 1.5rem;
+        }
+
+        .card h2 {
+            font-size: 1rem;
+            font-weight: 500;
+            color: var(--text-dim);
+            margin-bottom: 1rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+        }
+
+        .card-content {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .label {
+            color: var(--text-dim);
+        }
+
+        .value {
+            font-weight: 500;
+        }
+
+        .value.success {
+            color: var(--success);
+        }
+
+        .value.error {
+            color: var(--error);
+        }
+
+        input[type="text"],
+        input[type="password"],
+        input[type="url"] {
+            width: 100%;
+            padding: 0.75rem 1rem;
+            border: 1px solid #333;
+            border-radius: 0.5rem;
+            background: var(--bg);
+            color: var(--text);
+            font-size: 0.875rem;
+        }
+
+        input:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        button {
+            padding: 0.75rem 1.5rem;
+            border: none;
+            border-radius: 0.5rem;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: opacity 0.2s;
+        }
+
+        button:hover {
+            opacity: 0.9;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .btn-primary {
+            background: var(--accent);
+            color: white;
+        }
+
+        .btn-secondary {
+            background: #333;
+            color: var(--text);
+        }
+
+        .btn-block {
+            width: 100%;
+        }
+
+        .toggle {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .toggle input[type="checkbox"] {
+            width: 3rem;
+            height: 1.5rem;
+            appearance: none;
+            background: #333;
+            border-radius: 1rem;
+            position: relative;
+            cursor: pointer;
+        }
+
+        .toggle input[type="checkbox"]::before {
+            content: '';
+            position: absolute;
+            top: 2px;
+            left: 2px;
+            width: 1.25rem;
+            height: 1.25rem;
+            background: var(--text-dim);
+            border-radius: 50%;
+            transition: all 0.2s;
+        }
+
+        .toggle input[type="checkbox"]:checked {
+            background: var(--accent);
+        }
+
+        .toggle input[type="checkbox"]:checked::before {
+            left: calc(100% - 1.25rem - 2px);
+            background: white;
+        }
+
+        .result-box {
+            background: var(--bg);
+            border-radius: 0.5rem;
+            padding: 1rem;
+            font-family: monospace;
+            font-size: 0.875rem;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+
+        .auth-code {
+            font-size: 2rem;
+            font-weight: bold;
+            letter-spacing: 0.2em;
+            text-align: center;
+            padding: 1rem;
+            background: var(--bg);
+            border-radius: 0.5rem;
+            margin: 1rem 0;
+        }
+
+        .hidden {
+            display: none;
+        }
+
+        .mt-1 { margin-top: 0.5rem; }
+        .mt-2 { margin-top: 1rem; }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        .syncing {
+            animation: pulse 2s infinite;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1><span>Pakt</span></h1>
+            <div id="status-badge" class="status-badge ok">Ready</div>
+        </header>
+
+        <div class="grid">
+            <!-- Sync Card -->
+            <div class="card">
+                <h2>Sync</h2>
+                <div class="card-content">
+                    <button id="sync-btn" class="btn-primary btn-block" onclick="startSync(false)">
+                        Start Sync
+                    </button>
+                    <button class="btn-secondary btn-block" onclick="startSync(true)">
+                        Dry Run
+                    </button>
+                    <div id="sync-result" class="result-box mt-2 hidden"></div>
+                </div>
+            </div>
+
+            <!-- Last Sync Card -->
+            <div class="card">
+                <h2>Last Sync</h2>
+                <div class="card-content">
+                    <div class="row">
+                        <span class="label">Time</span>
+                        <span id="last-run" class="value">Never</span>
+                    </div>
+                    <div class="row">
+                        <span class="label">Added to Trakt</span>
+                        <span id="added-trakt" class="value">-</span>
+                    </div>
+                    <div class="row">
+                        <span class="label">Added to Plex</span>
+                        <span id="added-plex" class="value">-</span>
+                    </div>
+                    <div class="row">
+                        <span class="label">Ratings Synced</span>
+                        <span id="ratings-synced" class="value">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Trakt Config -->
+            <div class="card">
+                <h2>Trakt</h2>
+                <div class="card-content">
+                    <div class="row">
+                        <span class="label">Status</span>
+                        <span id="trakt-status" class="value">Not configured</span>
+                    </div>
+                    <input type="text" id="trakt-client-id" placeholder="Client ID">
+                    <input type="password" id="trakt-client-secret" placeholder="Client Secret">
+                    <button class="btn-secondary btn-block mt-1" onclick="saveTrakt()">Save</button>
+                    <button id="trakt-auth-btn" class="btn-primary btn-block mt-1" onclick="startTraktAuth()">
+                        Authenticate
+                    </button>
+                    <div id="trakt-auth-box" class="hidden">
+                        <p class="mt-2">Go to: <a href="" id="trakt-auth-url" target="_blank" style="color: var(--accent)"></a></p>
+                        <div id="trakt-auth-code" class="auth-code"></div>
+                        <p style="color: var(--text-dim); text-align: center;">Waiting for authorization...</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Plex Config -->
+            <div class="card">
+                <h2>Plex</h2>
+                <div class="card-content">
+                    <div class="row">
+                        <span class="label">Status</span>
+                        <span id="plex-status" class="value">Not configured</span>
+                    </div>
+                    <input type="url" id="plex-url" placeholder="http://localhost:32400">
+                    <input type="password" id="plex-token" placeholder="Plex Token">
+                    <button class="btn-secondary btn-block mt-1" onclick="savePlex()">Save</button>
+                    <button class="btn-primary btn-block mt-1" onclick="testPlex()">Test Connection</button>
+                    <div id="plex-result" class="result-box mt-2 hidden"></div>
+                </div>
+            </div>
+
+            <!-- Sync Options -->
+            <div class="card">
+                <h2>Sync Options</h2>
+                <div class="card-content">
+                    <label class="toggle">
+                        <input type="checkbox" id="watched-plex-to-trakt" checked>
+                        <span>Watched: Plex → Trakt</span>
+                    </label>
+                    <label class="toggle">
+                        <input type="checkbox" id="watched-trakt-to-plex" checked>
+                        <span>Watched: Trakt → Plex</span>
+                    </label>
+                    <label class="toggle">
+                        <input type="checkbox" id="ratings-plex-to-trakt" checked>
+                        <span>Ratings: Plex → Trakt</span>
+                    </label>
+                    <label class="toggle">
+                        <input type="checkbox" id="ratings-trakt-to-plex" checked>
+                        <span>Ratings: Trakt → Plex</span>
+                    </label>
+                    <button class="btn-secondary btn-block mt-2" onclick="saveSyncOptions()">
+                        Save Options
+                    </button>
+                </div>
+            </div>
+
+            <!-- Cache -->
+            <div class="card">
+                <h2>Cache</h2>
+                <div class="card-content">
+                    <div class="row">
+                        <span class="label">ID Mappings</span>
+                        <span id="cache-ids" class="value">-</span>
+                    </div>
+                    <div class="row">
+                        <span class="label">Watched Cache</span>
+                        <span id="cache-watched" class="value">-</span>
+                    </div>
+                    <div class="row">
+                        <span class="label">Ratings Cache</span>
+                        <span id="cache-ratings" class="value">-</span>
+                    </div>
+                    <button class="btn-secondary btn-block mt-2" onclick="clearCache()">
+                        Clear Expired
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Load initial status
+        async function loadStatus() {
+            try {
+                const resp = await fetch('/api/status');
+                const data = await resp.json();
+
+                // Update status badge
+                const badge = document.getElementById('status-badge');
+                if (data.sync_running) {
+                    badge.textContent = 'Syncing...';
+                    badge.className = 'status-badge running';
+                } else if (data.trakt_authenticated && data.plex_configured) {
+                    badge.textContent = 'Ready';
+                    badge.className = 'status-badge ok';
+                } else {
+                    badge.textContent = 'Setup Required';
+                    badge.className = 'status-badge error';
+                }
+
+                // Update Trakt status
+                document.getElementById('trakt-status').textContent =
+                    data.trakt_authenticated ? 'Authenticated' :
+                    data.trakt_configured ? 'Not authenticated' : 'Not configured';
+                document.getElementById('trakt-status').className =
+                    'value ' + (data.trakt_authenticated ? 'success' : 'error');
+
+                // Update Plex status
+                document.getElementById('plex-status').textContent =
+                    data.plex_configured ? 'Configured' : 'Not configured';
+                document.getElementById('plex-status').className =
+                    'value ' + (data.plex_configured ? 'success' : 'error');
+
+                // Update cache stats
+                if (data.cache_stats) {
+                    document.getElementById('cache-ids').textContent = data.cache_stats.id_mappings || 0;
+                    document.getElementById('cache-watched').textContent = data.cache_stats.watched_cache || 0;
+                    document.getElementById('cache-ratings').textContent = data.cache_stats.ratings_cache || 0;
+                }
+
+                // Update last run
+                if (data.last_run) {
+                    document.getElementById('last-run').textContent = new Date(data.last_run).toLocaleString();
+                }
+                if (data.last_result) {
+                    document.getElementById('added-trakt').textContent = data.last_result.added_to_trakt || 0;
+                    document.getElementById('added-plex').textContent = data.last_result.added_to_plex || 0;
+                    document.getElementById('ratings-synced').textContent = data.last_result.ratings_synced || 0;
+                }
+            } catch (e) {
+                console.error('Failed to load status:', e);
+            }
+        }
+
+        async function loadConfig() {
+            try {
+                const resp = await fetch('/api/config');
+                const data = await resp.json();
+
+                // Update sync options
+                document.getElementById('watched-plex-to-trakt').checked = data.sync?.watched_plex_to_trakt ?? true;
+                document.getElementById('watched-trakt-to-plex').checked = data.sync?.watched_trakt_to_plex ?? true;
+                document.getElementById('ratings-plex-to-trakt').checked = data.sync?.ratings_plex_to_trakt ?? true;
+                document.getElementById('ratings-trakt-to-plex').checked = data.sync?.ratings_trakt_to_plex ?? true;
+            } catch (e) {
+                console.error('Failed to load config:', e);
+            }
+        }
+
+        async function startSync(dryRun) {
+            const btn = document.getElementById('sync-btn');
+            const resultBox = document.getElementById('sync-result');
+
+            btn.disabled = true;
+            btn.textContent = 'Syncing...';
+            resultBox.classList.remove('hidden');
+            resultBox.textContent = 'Starting sync...';
+
+            try {
+                const resp = await fetch('/api/sync', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({dry_run: dryRun})
+                });
+                const data = await resp.json();
+
+                if (data.status === 'started') {
+                    // Poll for completion
+                    pollSyncStatus(resultBox);
+                } else {
+                    resultBox.textContent = data.message || 'Error starting sync';
+                    btn.disabled = false;
+                    btn.textContent = 'Start Sync';
+                }
+            } catch (e) {
+                resultBox.textContent = 'Error: ' + e.message;
+                btn.disabled = false;
+                btn.textContent = 'Start Sync';
+            }
+        }
+
+        async function pollSyncStatus(resultBox) {
+            const btn = document.getElementById('sync-btn');
+
+            const poll = async () => {
+                const resp = await fetch('/api/sync/status');
+                const data = await resp.json();
+
+                if (data.running) {
+                    resultBox.textContent = 'Syncing...\n' + (data.logs || []).join('\n');
+                    setTimeout(poll, 1000);
+                } else {
+                    btn.disabled = false;
+                    btn.textContent = 'Start Sync';
+                    loadStatus();
+
+                    if (data.last_result) {
+                        if (data.last_result.error) {
+                            resultBox.textContent = 'Error: ' + data.last_result.error;
+                        } else {
+                            resultBox.textContent = `Done!\nAdded to Trakt: ${data.last_result.added_to_trakt}\nAdded to Plex: ${data.last_result.added_to_plex}\nRatings: ${data.last_result.ratings_synced}\nDuration: ${data.last_result.duration?.toFixed(1)}s`;
+                        }
+                    }
+                }
+            };
+
+            poll();
+        }
+
+        async function saveTrakt() {
+            const clientId = document.getElementById('trakt-client-id').value;
+            const clientSecret = document.getElementById('trakt-client-secret').value;
+
+            await fetch('/api/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    trakt_client_id: clientId,
+                    trakt_client_secret: clientSecret
+                })
+            });
+
+            loadStatus();
+        }
+
+        async function startTraktAuth() {
+            const authBox = document.getElementById('trakt-auth-box');
+            const authBtn = document.getElementById('trakt-auth-btn');
+
+            authBtn.disabled = true;
+
+            try {
+                const resp = await fetch('/api/trakt/auth');
+                const data = await resp.json();
+
+                if (data.error) {
+                    alert(data.error);
+                    authBtn.disabled = false;
+                    return;
+                }
+
+                authBox.classList.remove('hidden');
+                document.getElementById('trakt-auth-url').href = data.verification_url;
+                document.getElementById('trakt-auth-url').textContent = data.verification_url;
+                document.getElementById('trakt-auth-code').textContent = data.user_code;
+
+                // Poll for auth completion
+                const pollAuth = async () => {
+                    const pollResp = await fetch('/api/trakt/auth/poll?device_code=' + data.device_code, {method: 'POST'});
+                    const pollData = await pollResp.json();
+
+                    if (pollData.status === 'authenticated') {
+                        authBox.classList.add('hidden');
+                        authBtn.disabled = false;
+                        loadStatus();
+                        alert('Trakt authenticated!');
+                    } else if (pollData.status === 'pending') {
+                        setTimeout(pollAuth, data.interval * 1000);
+                    } else {
+                        authBox.classList.add('hidden');
+                        authBtn.disabled = false;
+                        alert('Authentication failed or expired');
+                    }
+                };
+
+                setTimeout(pollAuth, data.interval * 1000);
+            } catch (e) {
+                authBtn.disabled = false;
+                alert('Error: ' + e.message);
+            }
+        }
+
+        async function savePlex() {
+            const url = document.getElementById('plex-url').value;
+            const token = document.getElementById('plex-token').value;
+
+            await fetch('/api/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    plex_url: url,
+                    plex_token: token
+                })
+            });
+
+            loadStatus();
+        }
+
+        async function testPlex() {
+            const resultBox = document.getElementById('plex-result');
+            resultBox.classList.remove('hidden');
+            resultBox.textContent = 'Testing...';
+
+            try {
+                const resp = await fetch('/api/plex/test', {method: 'POST'});
+                const data = await resp.json();
+
+                if (data.status === 'ok') {
+                    resultBox.textContent = `Connected to: ${data.server_name}\nMovies: ${data.movie_libraries.join(', ')}\nShows: ${data.show_libraries.join(', ')}`;
+                } else {
+                    resultBox.textContent = 'Error: ' + data.message;
+                }
+            } catch (e) {
+                resultBox.textContent = 'Error: ' + e.message;
+            }
+        }
+
+        async function saveSyncOptions() {
+            await fetch('/api/config', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({
+                    watched_plex_to_trakt: document.getElementById('watched-plex-to-trakt').checked,
+                    watched_trakt_to_plex: document.getElementById('watched-trakt-to-plex').checked,
+                    ratings_plex_to_trakt: document.getElementById('ratings-plex-to-trakt').checked,
+                    ratings_trakt_to_plex: document.getElementById('ratings-trakt-to-plex').checked
+                })
+            });
+
+            alert('Options saved!');
+        }
+
+        async function clearCache() {
+            const resp = await fetch('/api/cache/clear', {method: 'POST'});
+            const data = await resp.json();
+            alert(`Cleared ${data.removed} expired entries`);
+            loadStatus();
+        }
+
+        // Initial load
+        loadStatus();
+        loadConfig();
+
+        // Refresh status every 5 seconds
+        setInterval(loadStatus, 5000);
+    </script>
+</body>
+</html>
