@@ -1,4 +1,4 @@
-# Pakt
+# <img src="src/pakt/assets/icon.png" width="32" alt=""> Pakt
 
 Sync watched status, ratings, and collections between Plex and Trakt.
 
