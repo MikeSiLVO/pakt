@@ -2,15 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import datetime
-from typing import Any
+from collections.abc import Iterator
 
 from plexapi.myplex import MyPlexAccount
 from plexapi.server import PlexServer
 from plexapi.video import Episode, Movie, Show
 
 from pakt.config import PlexConfig
-from pakt.models import MediaItem, MediaType, PlexIds, TraktIds
+from pakt.models import MediaItem, MediaType, PlexIds
 
 
 class PlexClient:
@@ -19,6 +18,7 @@ class PlexClient:
     def __init__(self, config: PlexConfig):
         self.config = config
         self._server: PlexServer | None = None
+        self._account: MyPlexAccount | None = None
 
     def connect(self) -> None:
         """Connect to Plex server."""
@@ -29,6 +29,13 @@ class PlexClient:
             self._server = account.resource(self.config.server_name).connect()
         else:
             raise ValueError("Need either URL+token or token+server_name")
+
+    @property
+    def account(self) -> MyPlexAccount:
+        """Get MyPlex account for watchlist operations."""
+        if self._account is None:
+            self._account = MyPlexAccount(token=self.config.token)
+        return self._account
 
     @property
     def server(self) -> PlexServer:
@@ -46,25 +53,86 @@ class PlexClient:
 
     def get_all_movies(self, library_names: list[str] | None = None) -> list[Movie]:
         """Get all movies from specified libraries."""
+        movies, _ = self.get_all_movies_with_counts(library_names)
+        return movies
+
+    def get_all_movies_with_counts(self, library_names: list[str] | None = None) -> tuple[list[Movie], dict[str, int]]:
+        """Get all movies from specified libraries with per-library counts."""
         movies = []
+        lib_counts: dict[str, int] = {}
         for section in self.server.library.sections():
             if section.type != "movie":
                 continue
             if library_names and section.title not in library_names:
                 continue
-            movies.extend(section.all())
-        return movies
+            section_movies = section.all()
+            lib_counts[section.title] = len(section_movies)
+            movies.extend(section_movies)
+        return movies, lib_counts
 
     def get_all_shows(self, library_names: list[str] | None = None) -> list[Show]:
         """Get all shows from specified libraries."""
+        shows, _ = self.get_all_shows_with_counts(library_names)
+        return shows
+
+    def get_all_shows_with_counts(self, library_names: list[str] | None = None) -> tuple[list[Show], dict[str, int]]:
+        """Get all shows from specified libraries with per-library counts."""
         shows = []
+        lib_counts: dict[str, int] = {}
         for section in self.server.library.sections():
             if section.type != "show":
                 continue
             if library_names and section.title not in library_names:
                 continue
-            shows.extend(section.all())
-        return shows
+            section_shows = section.all()
+            lib_counts[section.title] = len(section_shows)
+            shows.extend(section_shows)
+        return shows, lib_counts
+
+    def get_all_episodes(self, library_names: list[str] | None = None) -> list[Episode]:
+        """Get ALL episodes from specified libraries in a single batch per library."""
+        episodes = []
+        for section in self.server.library.sections():
+            if section.type != "show":
+                continue
+            if library_names and section.title not in library_names:
+                continue
+            # Batch fetch all episodes from this library at once
+            episodes.extend(section.searchEpisodes())
+        return episodes
+
+    def get_all_episodes_with_counts(self, library_names: list[str] | None = None) -> tuple[list[Episode], dict[str, int]]:
+        """Get ALL episodes from specified libraries with per-library counts."""
+        episodes = []
+        lib_counts: dict[str, int] = {}
+        for section in self.server.library.sections():
+            if section.type != "show":
+                continue
+            if library_names and section.title not in library_names:
+                continue
+            # Batch fetch all episodes from this library at once
+            section_episodes = section.searchEpisodes()
+            lib_counts[section.title] = len(section_episodes)
+            episodes.extend(section_episodes)
+        return episodes, lib_counts
+
+    def iter_movies_by_library(self, library_names: list[str] | None = None) -> Iterator[tuple[str, list[Movie]]]:
+        """Yield movies one library at a time for memory efficiency."""
+        for section in self.server.library.sections():
+            if section.type != "movie":
+                continue
+            if library_names and section.title not in library_names:
+                continue
+            yield section.title, section.all()
+
+    def iter_episodes_by_library(self, library_names: list[str] | None = None) -> Iterator[tuple[str, list[Episode]]]:
+        """Yield episodes one library at a time for memory efficiency."""
+        for section in self.server.library.sections():
+            if section.type != "show":
+                continue
+            if library_names and section.title not in library_names:
+                continue
+            yield section.title, section.searchEpisodes()
 
     def get_watched_movies(self, library_names: list[str] | None = None) -> list[Movie]:
         """Get all watched movies."""
@@ -103,6 +171,294 @@ class PlexClient:
     def set_rating(self, item: Movie | Show | Episode, rating: float) -> None:
         """Set rating for an item (1-10 scale)."""
         item.rate(rating)
+
+    # =========================================================================
+    # WATCHLIST OPERATIONS - Uses MyPlexAccount (account-level, not per-server)
+    # =========================================================================
+
+    def get_watchlist(self) -> list[Movie | Show]:
+        """Get account watchlist (includes items not in library)."""
+        return self.account.watchlist()
+
+    def add_to_watchlist(self, item: Movie | Show) -> None:
+        """Add item to account watchlist."""
+        self.account.addToWatchlist(item)
+
+    def remove_from_watchlist(self, item: Movie | Show) -> None:
+        """Remove item from account watchlist."""
+        self.account.removeFromWatchlist(item)
+
+    def search_discover(self, query: str, libtype: str | None = None) -> list[Movie | Show]:
+        """Search Plex Discover for items (not in library).
+
+        Use this to find items by title for adding to watchlist.
+        """
+        return self.account.searchDiscover(query, libtype=libtype)
+
+
+# =============================================================================
+# MEDIA METADATA EXTRACTION - For Trakt collection sync
+# =============================================================================
+
+# Resolution mapping: Plex videoResolution -> Trakt resolution
+RESOLUTION_MAP = {
+    "4k": "uhd_4k",
+    "1080": "hd_1080p",
+    "720": "hd_720p",
+    "576": "sd_576p",
+    "480": "sd_480p",
+    "sd": "sd_480p",
+}
+
+# Resolution ranking for scoring (higher = better)
+RESOLUTION_RANK = {
+    "uhd_4k": 5,
+    "hd_1080p": 4,
+    "hd_1080i": 4,
+    "hd_720p": 3,
+    "sd_576p": 2,
+    "sd_576i": 2,
+    "sd_480p": 1,
+    "sd_480i": 1,
+}
+
+# HDR ranking (higher = better)
+HDR_RANK = {
+    "dolby_vision": 4,
+    "hdr10_plus": 3,
+    "hdr10": 2,
+    "hlg": 1,
+}
+
+# Audio codec mapping: Plex audioCodec -> Trakt audio
+AUDIO_CODEC_MAP = {
+    "truehd": "dolby_truehd",
+    "eac3": "dolby_digital_plus",
+    "ac3": "dolby_digital",
+    "dca": "dts",  # DTS core
+    "dts": "dts",
+    "dts-hd ma": "dts_ma",
+    "dts-hd hra": "dts_hr",
+    "aac": "aac",
+    "flac": "flac",
+    "pcm": "lpcm",
+    "mp3": "mp3",
+    "mp2": "mp2",
+    "vorbis": "ogg",
+    "opus": "ogg_opus",
+    "wma": "wma",
+}
+
+# Audio codec ranking (higher = better)
+AUDIO_RANK = {
+    "dolby_atmos": 7,
+    "dolby_digital_plus_atmos": 6,
+    "dts_x": 6,
+    "dolby_truehd": 5,
+    "dts_ma": 5,
+    "dts_hr": 4,
+    "dolby_digital_plus": 3,
+    "dts": 3,
+    "dolby_digital": 2,
+    "flac": 2,
+    "lpcm": 2,
+    "aac": 1,
+    "mp3": 0,
+}
+
+# Channel count to Trakt format
+CHANNELS_MAP = {
+    1: "1.0",
+    2: "2.0",
+    3: "2.1",
+    6: "5.1",
+    7: "6.1",
+    8: "7.1",
+}
+
+
+def _get_video_stream(media) -> object | None:
+    """Get the primary video stream from media."""
+    try:
+        for part in media.parts:
+            for stream in part.streams:
+                if stream.streamType == 1:  # Video stream
+                    return stream
+    except (AttributeError, TypeError):
+        pass
+    return None
+
+
+def _get_audio_stream(media) -> object | None:
+    """Get the primary audio stream from media."""
+    try:
+        for part in media.parts:
+            for stream in part.streams:
+                if stream.streamType == 2:  # Audio stream
+                    return stream
+    except (AttributeError, TypeError):
+        pass
+    return None
+
+
+def _detect_hdr_type(video_stream) -> str | None:
+    """Detect HDR type from video stream attributes."""
+    if video_stream is None:
+        return None
+
+    # Check for Dolby Vision
+    if getattr(video_stream, "DOVIPresent", False):
+        return "dolby_vision"
+
+    # Check colorTrc for HDR format
+    color_trc = getattr(video_stream, "colorTrc", None)
+    if color_trc:
+        if color_trc == "smpte2084":
+            # Could be HDR10 or HDR10+ - check displayTitle for HDR10+
+            display_title = getattr(video_stream, "displayTitle", "") or ""
+            if "HDR10+" in display_title or "HDR10Plus" in display_title.replace(" ", ""):
+                return "hdr10_plus"
+            return "hdr10"
+        elif color_trc == "arib-std-b67":
+            return "hlg"
+
+    return None
+
+
+def _detect_audio_codec(media, audio_stream) -> str | None:
+    """Detect audio codec and check for Atmos/DTS:X."""
+    codec = getattr(media, "audioCodec", None)
+    if not codec:
+        return None
+
+    codec = codec.lower()
+
+    # Check for Atmos in the audio stream
+    if audio_stream:
+        display_title = getattr(audio_stream, "displayTitle", "") or ""
+        extended_display_title = getattr(audio_stream, "extendedDisplayTitle", "") or ""
+        combined = f"{display_title} {extended_display_title}".lower()
+
+        if "atmos" in combined:
+            if codec == "truehd":
+                return "dolby_atmos"
+            elif codec == "eac3":
+                return "dolby_digital_plus_atmos"
+
+        if "dts:x" in combined or "dts-x" in combined:
+            return "dts_x"
+
+    # Fall back to standard codec mapping
+    return AUDIO_CODEC_MAP.get(codec)
+
+
+def _detect_audio_channels(media, audio_stream) -> str | None:
+    """Detect audio channel configuration."""
+    channels = getattr(media, "audioChannels", None)
+    if not channels:
+        return None
+
+    # Check for Atmos height channels in stream layout
+    if audio_stream:
+        channel_layout = getattr(audio_stream, "audioChannelLayout", "") or ""
+        display_title = getattr(audio_stream, "displayTitle", "") or ""
+        combined = f"{channel_layout} {display_title}".lower()
+
+        # Detect object-based audio with height channels
+        if "atmos" in combined or "dts:x" in combined:
+            if channels >= 8:
+                if "7.1.4" in combined:
+                    return "7.1.4"
+                elif "7.1.2" in combined:
+                    return "7.1.2"
+                return "7.1"
+            elif channels >= 6:
+                if "5.1.4" in combined:
+                    return "5.1.4"
+                elif "5.1.2" in combined:
+                    return "5.1.2"
+                return "5.1"
+
+    # Standard channel mapping
+    return CHANNELS_MAP.get(channels)
+
+
+def _score_media(media) -> int:
+    """Score a media version for quality comparison. Higher = better."""
+    score = 0
+
+    # Resolution score (0-5000)
+    resolution = getattr(media, "videoResolution", None)
+    if resolution:
+        trakt_res = RESOLUTION_MAP.get(resolution.lower(), "sd_480p")
+        score += RESOLUTION_RANK.get(trakt_res, 1) * 1000
+
+    # HDR score (0-400)
+    video_stream = _get_video_stream(media)
+    hdr_type = _detect_hdr_type(video_stream)
+    if hdr_type:
+        score += HDR_RANK.get(hdr_type, 0) * 100
+
+    # Audio score (0-70)
+    audio_stream = _get_audio_stream(media)
+    audio_codec = _detect_audio_codec(media, audio_stream)
+    if audio_codec:
+        score += AUDIO_RANK.get(audio_codec, 0) * 10
+
+    # Channels score (0-8)
+    channels = getattr(media, "audioChannels", 0) or 0
+    score += min(channels, 8)
+
+    return score
+
+
+def extract_media_metadata(item: Movie | Episode) -> dict:
+    """Extract best quality media metadata for Trakt collection.
+
+    Examines all media versions and returns metadata for the best quality one.
+    """
+    if not hasattr(item, "media") or not item.media:
+        return {}
+
+    # Find best quality media version
+    best_media = None
+    best_score = -1
+    for media in item.media:
+        score = _score_media(media)
+        if score > best_score:
+            best_score = score
+            best_media = media
+
+    if not best_media:
+        return {}
+
+    metadata: dict = {"media_type": "digital"}
+
+    # Resolution
+    resolution = getattr(best_media, "videoResolution", None)
+    if resolution:
+        trakt_res = RESOLUTION_MAP.get(resolution.lower())
+        if trakt_res:
+            metadata["resolution"] = trakt_res
+
+    # HDR
+    video_stream = _get_video_stream(best_media)
+    hdr_type = _detect_hdr_type(video_stream)
+    if hdr_type:
+        metadata["hdr"] = hdr_type
+
+    # Audio codec
+    audio_stream = _get_audio_stream(best_media)
+    audio_codec = _detect_audio_codec(best_media, audio_stream)
+    if audio_codec:
+        metadata["audio"] = audio_codec
+
+    # Audio channels
+    audio_channels = _detect_audio_channels(best_media, audio_stream)
+    if audio_channels:
+        metadata["audio_channels"] = audio_channels
+
+    return metadata
 
 
 def extract_plex_ids(item: Movie | Show | Episode) -> PlexIds:

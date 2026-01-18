@@ -1,6 +1,6 @@
 # Pakt
 
-Plex-Trakt sync tool using batch API operations.
+Sync watched status, ratings, and collections between Plex and Trakt.
 
 ## Installation
 
@@ -8,55 +8,76 @@ Plex-Trakt sync tool using batch API operations.
 pip install pakt
 ```
 
-Or with pipx:
-
+With system tray support (Windows):
 ```bash
-pipx install pakt
+pip install pakt[tray]
 ```
 
-## Usage
+## Quick Start
 
 ```bash
-# Authenticate with Trakt
-pakt login
-
-# Configure Plex connection
-pakt setup
-
-# Run sync
-pakt sync
-
-# Preview changes without applying
-pakt sync --dry-run
-
-# View configuration and cache status
-pakt status
-
-# Clear expired cache entries
-pakt clear-cache
+pakt setup    # Interactive setup wizard
+pakt sync     # Run sync
 ```
+
+## Commands
+
+```bash
+pakt setup              # Configure Plex and Trakt
+pakt sync               # Sync everything
+pakt sync --dry-run     # Preview without changes
+pakt sync --verbose     # Show detailed item list
+pakt serve              # Start web interface
+pakt serve --tray       # Web interface with system tray (Windows)
+pakt status             # Show configuration
+pakt libraries          # Manage library selection
+pakt login              # Authenticate with Trakt
+pakt logout             # Clear Trakt authentication
+```
+
+## Web Interface
+
+Start the web UI:
+```bash
+pakt serve
+```
+
+Open http://localhost:8080 in your browser.
+
+Features:
+- Run syncs with progress display
+- Configure sync options
+- View Trakt account status
+- Set up scheduled syncs
+- Select which libraries to sync
+
+## Background Mode (Windows)
+
+Run without a console window:
+```bash
+pythonw -m pakt serve --tray
+```
+
+## What Gets Synced
+
+| Data | Plex → Trakt | Trakt → Plex |
+|------|:------------:|:------------:|
+| Watched status | ✓ | ✓ |
+| Ratings | ✓ | ✓ |
+| Collection | ✓ | - |
+| Watchlist | ✓ | ✓ |
+
+Collection sync includes media info (resolution, HDR, audio codec).
 
 ## Configuration
 
-Configuration is stored in `~/.config/pakt/.env`:
+Config location:
+- Windows: `%APPDATA%\pakt`
+- Linux/macOS: `~/.config/pakt`
 
-```bash
-TRAKT_CLIENT_ID=your_client_id
-TRAKT_CLIENT_SECRET=your_client_secret
-PLEX_URL=http://localhost:32400
-PLEX_TOKEN=your_plex_token
-```
+## Trakt Account Limits
 
-Create Trakt API credentials at: https://trakt.tv/oauth/applications
-
-## Features
-
-- Bidirectional sync (Plex ↔ Trakt)
-- Watched status sync
-- Rating sync
-- SQLite caching
-- Async operations
-- Dry-run mode
+Free Trakt accounts have a 100-item limit on collections and watchlists. Pakt will warn you if you hit these limits. Upgrade to [Trakt VIP](https://trakt.tv/vip) for unlimited.
 
 ## License
 
