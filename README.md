@@ -163,7 +163,7 @@ Free Trakt accounts have a 100-item limit on collections and watchlists. Pakt wi
 
 ## Changelog
 
-See [CHANGELOG.md](CHANGELOG.md) for release history.
+See [CHANGELOG.md](https://github.com/MikeSiLVO/Pakt/blob/main/CHANGELOG.md) for release history.
 
 ## License
 

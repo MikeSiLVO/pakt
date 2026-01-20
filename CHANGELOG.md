@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.2.1] - 2025-01-20
+
+### Fixed
+- README changelog link now works on PyPI
+
 ## [0.2.0] - 2025-01-20
 
 ### Added
