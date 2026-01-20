@@ -1,4 +1,5 @@
 """System tray integration for Pakt."""
+# pyright: reportPossiblyUnboundVariable=false
 
 from __future__ import annotations
 
@@ -7,6 +8,12 @@ import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING, Callable
 
+if TYPE_CHECKING:
+    import pystray
+    from PIL import Image
+
+    from pakt.scheduler import SyncScheduler
+
 try:
     import pystray
     from PIL import Image
@@ -14,9 +21,6 @@ try:
     TRAY_AVAILABLE = True
 except ImportError:
     TRAY_AVAILABLE = False
-
-if TYPE_CHECKING:
-    from pakt.scheduler import SyncScheduler
 
 
 def _get_icon_image() -> "Image.Image":
@@ -107,15 +111,16 @@ class PaktTray:
             return
 
         icon_image = _get_icon_image()
-        self._icon = pystray.Icon(
+        icon = pystray.Icon(
             name="Pakt",
             icon=icon_image,
             title="Pakt - Plex/Trakt Sync",
             menu=self._get_menu(),
         )
+        self._icon = icon
 
         def run_icon():
-            self._icon.run()
+            icon.run()
 
         self._thread = threading.Thread(target=run_icon, daemon=True)
         self._thread.start()

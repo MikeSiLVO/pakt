@@ -2,31 +2,182 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
+import logging
+from collections.abc import Iterator, Sequence
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import dataclass
 
-from plexapi.myplex import MyPlexAccount
+from plexapi.myplex import MyPlexAccount, MyPlexPinLogin
 from plexapi.server import PlexServer
 from plexapi.video import Episode, Movie, Show
 
-from pakt.config import PlexConfig
+from pakt.config import ServerConfig
 from pakt.models import MediaItem, MediaType, PlexIds
+
+logger = logging.getLogger(__name__)
+
+
+def _disable_auto_reload(items: list) -> list:
+    """Disable PlexAPI auto-reload on items to prevent network calls for None attributes."""
+    for item in items:
+        item._autoReload = False
+    return items
+
+
+@dataclass
+class PlexPinAuth:
+    """Plex PIN authentication state."""
+
+    pin: str
+    pin_id: int
+    verification_url: str = "https://plex.tv/link"
+
+
+def start_plex_pin_login() -> tuple[MyPlexPinLogin, PlexPinAuth]:
+    """Start Plex PIN login flow.
+
+    Returns the login object (for polling) and auth info (to display to user).
+    """
+    login = MyPlexPinLogin()
+
+    # Explicitly trigger PIN fetch if not already done
+    # The pin property should call _getCode() but let's be explicit
+    if hasattr(login, '_getCode'):
+        login._getCode()
+
+    pin_code = getattr(login, '_code', None) or getattr(login, 'pin', None)
+    pin_id = getattr(login, '_id', None)
+
+    if not pin_code:
+        # Try accessing the pin property which might trigger the fetch
+        try:
+            pin_code = login.pin
+        except Exception as e:
+            raise RuntimeError(f"Failed to get PIN code from Plex: {e}")
+
+    if not pin_code:
+        raise RuntimeError("Failed to get PIN code from Plex - API returned empty response")
+
+    return login, PlexPinAuth(
+        pin=str(pin_code),
+        pin_id=int(pin_id) if pin_id else 0,
+    )
+
+
+def check_plex_pin_login(login: MyPlexPinLogin) -> str | None:
+    """Check if PIN login has been authorized.
+
+    Returns the permanent account token if authorized, None if still pending.
+    The initial PIN login may return a temporary token, so we exchange it
+    for a permanent one via MyPlexAccount.
+    """
+    if login.checkLogin():
+        # The PIN login token may be temporary - exchange it for permanent token
+        # by creating a MyPlexAccount which fetches the account's auth token
+        temp_token = login.token
+        try:
+            account = MyPlexAccount(token=temp_token)
+            # authenticationToken is the permanent account token
+            return account.authenticationToken
+        except Exception:
+            # Fall back to the PIN token if exchange fails
+            return temp_token
+    return None
+
+
+@dataclass
+class DiscoveredServer:
+    """A Plex server discovered from the user's account."""
+
+    name: str
+    client_identifier: str
+    provides: str  # "server" for media servers
+    owned: bool
+    connections: list[dict]  # List of {uri, local, relay} dicts
+
+    @property
+    def has_local_connection(self) -> bool:
+        return any(c.get("local") for c in self.connections)
+
+    @property
+    def best_connection_url(self) -> str | None:
+        """Get the best connection URL (prefer local, non-relay)."""
+        # Prefer local non-relay connections
+        for conn in self.connections:
+            if conn.get("local") and not conn.get("relay"):
+                return conn.get("uri")
+        # Then non-relay
+        for conn in self.connections:
+            if not conn.get("relay"):
+                return conn.get("uri")
+        # Fall back to any connection
+        if self.connections:
+            return self.connections[0].get("uri")
+        return None
+
+
+def discover_servers(account_token: str) -> list[DiscoveredServer]:
+    """Discover all Plex servers accessible with the given account token."""
+    account = MyPlexAccount(token=account_token)
+    servers = []
+
+    for resource in account.resources():
+        # Only include actual servers
+        if "server" not in resource.provides:
+            continue
+
+        connections = []
+        for conn in resource.connections:
+            connections.append({
+                "uri": conn.uri,
+                "local": conn.local,
+                "relay": conn.relay,
+            })
+
+        servers.append(DiscoveredServer(
+            name=resource.name,
+            client_identifier=resource.clientIdentifier,
+            provides=resource.provides,
+            owned=resource.owned,
+            connections=connections,
+        ))
+
+    return servers
+
+
+def test_server_connection(account_token: str, server_name: str) -> tuple[bool, str]:
+    """Test connection to a specific server.
+
+    Returns (success, message).
+    """
+    try:
+        account = MyPlexAccount(token=account_token)
+        resource = account.resource(server_name)
+        server = resource.connect()
+        return True, f"Connected to {server.friendlyName}"
+    except Exception as e:
+        return False, str(e)
 
 
 class PlexClient:
     """Plex API client optimized for batch operations."""
 
-    def __init__(self, config: PlexConfig):
-        self.config = config
+    def __init__(self, server_config: ServerConfig):
+        """Initialize client with server configuration."""
+        self._url = server_config.url
+        self._token = server_config.token
+        self._server_name = server_config.server_name
+        self.server_config = server_config
         self._server: PlexServer | None = None
         self._account: MyPlexAccount | None = None
 
     def connect(self) -> None:
         """Connect to Plex server."""
-        if self.config.url and self.config.token:
-            self._server = PlexServer(self.config.url, self.config.token)
-        elif self.config.token and self.config.server_name:
-            account = MyPlexAccount(token=self.config.token)
-            self._server = account.resource(self.config.server_name).connect()
+        if self._url and self._token:
+            self._server = PlexServer(self._url, self._token)
+        elif self._token and self._server_name:
+            account = MyPlexAccount(token=self._token)
+            self._server = account.resource(self._server_name).connect()
         else:
             raise ValueError("Need either URL+token or token+server_name")
 
@@ -34,7 +185,7 @@ class PlexClient:
     def account(self) -> MyPlexAccount:
         """Get MyPlex account for watchlist operations."""
         if self._account is None:
-            self._account = MyPlexAccount(token=self.config.token)
+            self._account = MyPlexAccount(token=self._token)
         return self._account
 
     @property
@@ -65,8 +216,17 @@ class PlexClient:
                 continue
             if library_names and section.title not in library_names:
                 continue
-            section_movies = section.all()
-            lib_counts[section.title] = len(section_movies)
+            # Use large container_size to reduce HTTP requests
+            section_movies = section.all(container_size=1000)
+            _disable_auto_reload(section_movies)
+            # Handle duplicate library names by appending count
+            key = section.title
+            if key in lib_counts:
+                i = 2
+                while f"{section.title} ({i})" in lib_counts:
+                    i += 1
+                key = f"{section.title} ({i})"
+            lib_counts[key] = len(section_movies)
             movies.extend(section_movies)
         return movies, lib_counts
 
@@ -84,8 +244,17 @@ class PlexClient:
                 continue
             if library_names and section.title not in library_names:
                 continue
-            section_shows = section.all()
-            lib_counts[section.title] = len(section_shows)
+            # Use large container_size to reduce HTTP requests
+            section_shows = section.all(container_size=1000)
+            _disable_auto_reload(section_shows)
+            # Handle duplicate library names
+            key = section.title
+            if key in lib_counts:
+                i = 2
+                while f"{section.title} ({i})" in lib_counts:
+                    i += 1
+                key = f"{section.title} ({i})"
+            lib_counts[key] = len(section_shows)
             shows.extend(section_shows)
         return shows, lib_counts
 
@@ -97,11 +266,15 @@ class PlexClient:
                 continue
             if library_names and section.title not in library_names:
                 continue
-            # Batch fetch all episodes from this library at once
-            episodes.extend(section.searchEpisodes())
+            # Batch fetch all episodes - use large container_size to reduce HTTP requests
+            section_episodes = section.searchEpisodes(container_size=1000)
+            _disable_auto_reload(section_episodes)
+            episodes.extend(section_episodes)
         return episodes
 
-    def get_all_episodes_with_counts(self, library_names: list[str] | None = None) -> tuple[list[Episode], dict[str, int]]:
+    def get_all_episodes_with_counts(
+        self, library_names: list[str] | None = None
+    ) -> tuple[list[Episode], dict[str, int]]:
         """Get ALL episodes from specified libraries with per-library counts."""
         episodes = []
         lib_counts: dict[str, int] = {}
@@ -110,9 +283,17 @@ class PlexClient:
                 continue
             if library_names and section.title not in library_names:
                 continue
-            # Batch fetch all episodes from this library at once
-            section_episodes = section.searchEpisodes()
-            lib_counts[section.title] = len(section_episodes)
+            # Batch fetch all episodes - use large container_size to reduce HTTP requests
+            section_episodes = section.searchEpisodes(container_size=1000)
+            _disable_auto_reload(section_episodes)
+            # Handle duplicate library names
+            key = section.title
+            if key in lib_counts:
+                i = 2
+                while f"{section.title} ({i})" in lib_counts:
+                    i += 1
+                key = f"{section.title} ({i})"
+            lib_counts[key] = len(section_episodes)
             episodes.extend(section_episodes)
         return episodes, lib_counts
 
@@ -172,9 +353,74 @@ class PlexClient:
         """Set rating for an item (1-10 scale)."""
         item.rate(rating)
 
-    # =========================================================================
-    # WATCHLIST OPERATIONS - Uses MyPlexAccount (account-level, not per-server)
-    # =========================================================================
+    def mark_watched_batch(
+        self, items: Sequence[Movie | Episode], max_workers: int = 10
+    ) -> list[tuple[Movie | Episode, Exception]]:
+        """Mark multiple items as watched concurrently.
+
+        Returns list of (item, error) tuples for any failures.
+        """
+        if not items:
+            return []
+
+        failed: list[tuple[Movie | Episode, Exception]] = []
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_item = {
+                executor.submit(item.markWatched): item
+                for item in items
+            }
+
+            for future in as_completed(future_to_item):
+                item = future_to_item[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    failed.append((item, e))
+                    logger.warning(f"Failed to mark watched: {item.title} - {e}")
+
+        if failed:
+            logger.error(f"Batch mark watched: {len(failed)}/{len(items)} failed")
+
+        return failed
+
+    def rate_batch(
+        self, items: Sequence[tuple[Movie | Show | Episode, int | float]], max_workers: int = 10
+    ) -> list[tuple[Movie | Show | Episode, int | float, Exception]]:
+        """Rate multiple items concurrently.
+
+        Args:
+            items: List of (item, rating) tuples
+
+        Returns list of (item, rating, error) tuples for any failures.
+        """
+        if not items:
+            return []
+
+        failed: list[tuple[Movie | Show | Episode, int | float, Exception]] = []
+
+        def rate_item(pair: tuple[Movie | Show | Episode, int | float]) -> None:
+            item, rating = pair
+            item.rate(rating)
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_item = {
+                executor.submit(rate_item, pair): pair
+                for pair in items
+            }
+
+            for future in as_completed(future_to_item):
+                item, rating = future_to_item[future]
+                try:
+                    future.result()
+                except Exception as e:
+                    failed.append((item, rating, e))
+                    logger.warning(f"Failed to rate: {item.title} ({rating}) - {e}")
+
+        if failed:
+            logger.error(f"Batch rate: {len(failed)}/{len(items)} failed")
+
+        return failed
 
     def get_watchlist(self) -> list[Movie | Show]:
         """Get account watchlist (includes items not in library)."""
@@ -189,16 +435,9 @@ class PlexClient:
         self.account.removeFromWatchlist(item)
 
     def search_discover(self, query: str, libtype: str | None = None) -> list[Movie | Show]:
-        """Search Plex Discover for items (not in library).
-
-        Use this to find items by title for adding to watchlist.
-        """
+        """Search Plex Discover for items not in library."""
         return self.account.searchDiscover(query, libtype=libtype)
 
-
-# =============================================================================
-# MEDIA METADATA EXTRACTION - For Trakt collection sync
-# =============================================================================
 
 # Resolution mapping: Plex videoResolution -> Trakt resolution
 RESOLUTION_MAP = {

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 
 import click
 from rich.console import Console
 from rich.table import Table
 
 from pakt import __version__
-from pakt.config import Config, get_config_dir
+from pakt.config import Config, ServerConfig, get_config_dir
 from pakt.trakt import DeviceAuthStatus, TraktClient
 
 console = Console()
@@ -36,9 +37,10 @@ def _make_token_refresh_callback(config: Config):
 @main.command()
 @click.option("--dry-run", is_flag=True, help="Show what would be synced without making changes")
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed list of items to sync")
-def sync(dry_run: bool, verbose: bool):
+@click.option("--server", "-s", "servers", multiple=True, help="Sync specific server(s) only (can specify multiple)")
+def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...]):
     """Sync watched status and ratings between Plex and Trakt."""
-    from pakt.sync import run_sync
+    from pakt.sync import run_multi_server_sync
 
     config = Config.load()
 
@@ -46,11 +48,18 @@ def sync(dry_run: bool, verbose: bool):
         console.print("[red]Error:[/] Not logged in to Trakt. Run 'pakt login' first.")
         sys.exit(1)
 
-    if not config.plex.url or not config.plex.token:
-        console.print("[red]Error:[/] Plex not configured. Run 'pakt setup' first.")
+    if not config.servers:
+        console.print("[red]Error:[/] No Plex servers configured. Run 'pakt setup' first.")
         sys.exit(1)
 
-    result = asyncio.run(run_sync(config, dry_run=dry_run, verbose=verbose, on_token_refresh=_make_token_refresh_callback(config)))
+    server_names = list(servers) if servers else None
+    result = asyncio.run(run_multi_server_sync(
+        config,
+        server_names=server_names,
+        dry_run=dry_run,
+        verbose=verbose,
+        on_token_refresh=_make_token_refresh_callback(config),
+    ))
 
     console.print("\n[bold green]Sync complete![/]")
     console.print(f"  Added to Trakt: {result.added_to_trakt}")
@@ -127,21 +136,24 @@ def logout():
 
 
 @main.command()
-def setup():
-    """Interactive setup wizard - configure Trakt and Plex in one go."""
-    from pakt.plex import PlexClient
+@click.option("--token", is_flag=True, help="Use manual token entry instead of PIN auth")
+def setup(token: bool):
+    """Interactive setup wizard - configure Trakt and Plex.
 
+    By default uses Plex PIN authentication. Use --token for manual token entry.
+    """
     config = Config.load()
 
     console.print("\n[bold cyan]═══ Pakt Setup Wizard ═══[/]\n")
 
     # Check what's already configured
     trakt_done = bool(config.trakt.access_token)
-    plex_done = bool(config.plex.url and config.plex.token)
+    plex_done = bool(config.servers)
 
     if trakt_done and plex_done:
         console.print("[green]✓[/] Trakt: Authenticated")
         console.print("[green]✓[/] Plex: Configured")
+        console.print(f"    Servers: {', '.join(s.name for s in config.servers)}")
         console.print("\nEverything is already set up! Run [cyan]pakt sync[/] to start syncing.")
         if click.confirm("\nReconfigure anyway?", default=False):
             trakt_done = False
@@ -189,51 +201,16 @@ def setup():
     if not plex_done:
         console.print("\n[bold]Step 2: Plex Connection[/]\n")
 
-        # Try to auto-detect local Plex
-        console.print("[dim]Checking for local Plex server...[/]")
-        detected_url = None
-        try:
-            import httpx
-            resp = httpx.get("http://localhost:32400/identity", timeout=2)
-            if resp.status_code == 200:
-                detected_url = "http://localhost:32400"
-                console.print(f"[green]✓[/] Found Plex at {detected_url}")
-        except Exception:
-            console.print("[dim]No local server found[/]")
+        if token:
+            # Manual token entry (legacy flow)
+            _setup_plex_manual(config)
+        else:
+            # PIN authentication (default)
+            _setup_plex_pin(config)
 
-        default_url = detected_url or config.plex.url or "http://localhost:32400"
-        config.plex.url = click.prompt("\nPlex server URL", default=default_url)
-
-        console.print("\n[dim]To get your Plex token:")
-        console.print("1. Open Plex Web App and sign in")
-        console.print("2. Open any media item")
-        console.print("3. Click ⋮ → Get Info → View XML")
-        console.print("4. In the URL, find X-Plex-Token=xxxxx")
-        console.print("5. Copy just the token part after the =[/]\n")
-
-        token = click.prompt("Plex token")
-        # Auto-strip prefix if user pasted the whole thing
-        if token.lower().startswith("x-plex-token="):
-            token = token[13:]
-        elif token.startswith("="):
-            token = token[1:]
-        config.plex.token = token
-        config.save()
-
-        # Test connection
-        console.print("\n[dim]Testing connection...[/]")
-        try:
-            plex = PlexClient(config.plex)
-            plex.connect()
-            console.print(f"[green]✓[/] Connected to: {plex.server.friendlyName}")
-            libs = plex.get_movie_libraries() + plex.get_show_libraries()
-            console.print(f"[green]✓[/] Libraries: {', '.join(libs)}")
-        except Exception as e:
-            console.print(f"[red]✗ Connection failed:[/] {e}")
-            console.print("\n[yellow]Check your URL and token, then run 'pakt setup' again.[/]")
-            return
     else:
         console.print("[green]✓[/] Plex: Already configured")
+        console.print(f"    Servers: {', '.join(s.name for s in config.servers)}")
 
     # Done!
     console.print("\n[bold green]═══ Setup Complete! ═══[/]\n")
@@ -241,6 +218,158 @@ def setup():
     console.print("  [cyan]pakt sync --dry-run[/]  - Preview what will sync")
     console.print("  [cyan]pakt sync[/]           - Run the sync")
     console.print("  [cyan]pakt serve[/]          - Start web interface")
+    console.print("  [cyan]pakt servers list[/]   - View configured servers")
+
+
+def _setup_plex_manual(config: Config) -> None:
+    """Manual Plex token setup (legacy flow)."""
+    from pakt.plex import PlexClient
+
+    # Try to auto-detect local Plex
+    console.print("[dim]Checking for local Plex server...[/]")
+    detected_url = None
+    try:
+        import httpx
+        resp = httpx.get("http://localhost:32400/identity", timeout=2)
+        if resp.status_code == 200:
+            detected_url = "http://localhost:32400"
+            console.print(f"[green]✓[/] Found Plex at {detected_url}")
+    except Exception:
+        console.print("[dim]No local server found[/]")
+
+    default_url = detected_url or "http://localhost:32400"
+    plex_url = click.prompt("\nPlex server URL", default=default_url)
+
+    console.print("\n[dim]To get your Plex token:")
+    console.print("1. Open Plex Web App and sign in")
+    console.print("2. Open any media item")
+    console.print("3. Click ⋮ → Get Info → View XML")
+    console.print("4. In the URL, find X-Plex-Token=xxxxx")
+    console.print("5. Copy just the token part after the =[/]\n")
+
+    plex_token = click.prompt("Plex token")
+    # Auto-strip prefix if user pasted the whole thing
+    if plex_token.lower().startswith("x-plex-token="):
+        plex_token = plex_token[13:]
+    elif plex_token.startswith("="):
+        plex_token = plex_token[1:]
+
+    # Create a server config for testing
+    server_config = ServerConfig(
+        name="default",
+        url=plex_url,
+        token=plex_token,
+        enabled=True,
+    )
+
+    # Test connection
+    console.print("\n[dim]Testing connection...[/]")
+    try:
+        plex = PlexClient(server_config)
+        plex.connect()
+        console.print(f"[green]✓[/] Connected to: {plex.server.friendlyName}")
+        libs = plex.get_movie_libraries() + plex.get_show_libraries()
+        console.print(f"[green]✓[/] Libraries: {', '.join(libs)}")
+
+        # Save the server to config
+        config.plex_token = plex_token
+        config.servers.append(server_config)
+        config.save()
+    except Exception as e:
+        console.print(f"[red]✗ Connection failed:[/] {e}")
+        console.print("\n[yellow]Check your URL and token, then run 'pakt setup' again.[/]")
+
+
+def _setup_plex_pin(config: Config) -> None:
+    """Plex PIN authentication flow with server discovery."""
+    from pakt.plex import (
+        check_plex_pin_login,
+        discover_servers,
+        start_plex_pin_login,
+    )
+
+    console.print("Link your Plex account to discover your servers automatically.\n")
+    console.print("[bold]→ Go to:[/] [cyan]https://plex.tv/link[/]")
+
+    # Start PIN login
+    login_obj, auth_info = start_plex_pin_login()
+    console.print(f"[bold]→ Enter:[/] [bold yellow]{auth_info.pin}[/]")
+    console.print("\n[dim]Waiting for you to authorize...[/]")
+
+    # Poll for completion
+    account_token = None
+    max_attempts = 60  # 5 minutes at 5 second intervals
+    for _ in range(max_attempts):
+        account_token = check_plex_pin_login(login_obj)
+        if account_token:
+            break
+        time.sleep(5)
+
+    if not account_token:
+        console.print("\n[red]✗ Authorization timed out[/]")
+        console.print("[dim]Try again with 'pakt setup' or use 'pakt setup --token' for manual entry[/]")
+        return
+
+    console.print("\n[green]✓ Plex account linked![/]")
+
+    # Save account token
+    config.plex_token = account_token
+    config.save()
+
+    # Discover servers
+    console.print("\n[dim]Discovering servers...[/]")
+    try:
+        discovered = discover_servers(account_token)
+    except Exception as e:
+        console.print(f"[red]✗ Failed to discover servers:[/] {e}")
+        return
+
+    if not discovered:
+        console.print("[yellow]No servers found on your account[/]")
+        return
+
+    console.print(f"\n[green]Found {len(discovered)} server(s):[/]\n")
+    for i, server in enumerate(discovered, 1):
+        owned = "[green]owned[/]" if server.owned else "[dim]shared[/]"
+        local = "[cyan]local[/]" if server.has_local_connection else ""
+        console.print(f"  {i}. {server.name} ({owned}) {local}")
+
+    # Select servers to enable
+    console.print("\n[dim]Enter server numbers to enable (comma-separated), or 'all':[/]")
+    selection = click.prompt("Enable servers", default="all")
+
+    if selection.lower() == "all":
+        selected_servers = discovered
+    else:
+        try:
+            indices = [int(x.strip()) - 1 for x in selection.split(",")]
+            selected_servers = [discovered[i] for i in indices if 0 <= i < len(discovered)]
+        except (ValueError, IndexError):
+            console.print("[yellow]Invalid selection, enabling all servers[/]")
+            selected_servers = discovered
+
+    # Create ServerConfig for each selected server
+    for server in selected_servers:
+        # Check if already configured
+        existing = config.get_server(server.name)
+        if existing:
+            console.print(f"  [dim]Server '{server.name}' already configured, updating...[/]")
+            existing.server_name = server.name
+            existing.url = server.best_connection_url or ""
+            existing.token = account_token
+        else:
+            server_config = ServerConfig(
+                name=server.name,
+                server_name=server.name,
+                url=server.best_connection_url or "",
+                token=account_token,
+                enabled=True,
+            )
+            config.servers.append(server_config)
+            console.print(f"  [green]✓[/] Added server: {server.name}")
+
+    config.save()
+    console.print(f"\n[green]✓ Configured {len(selected_servers)} server(s)[/]")
 
 
 @main.command()
@@ -260,14 +389,22 @@ def status():
     table.add_row("Authenticated", "[green]Yes[/]" if config.trakt.access_token else "[red]No[/]")
     console.print(table)
 
-    # Plex status
-    table = Table(title="Plex")
-    table.add_column("Setting", style="cyan")
-    table.add_column("Value")
+    # Plex servers status
+    servers = config.servers
+    if servers:
+        table = Table(title="Plex Servers")
+        table.add_column("Name", style="cyan")
+        table.add_column("Status")
+        table.add_column("Enabled")
 
-    table.add_row("URL", config.plex.url or "[red]Not set[/]")
-    table.add_row("Token", "***" if config.plex.token else "[red]Not set[/]")
-    console.print(table)
+        for server in servers:
+            status = "[green]Configured[/]" if (server.url or server.server_name) else "[red]Not set[/]"
+            enabled = "[green]Yes[/]" if server.enabled else "[dim]No[/]"
+            table.add_row(server.name, status, enabled)
+        console.print(table)
+    else:
+        console.print("\n[yellow]No Plex servers configured[/]")
+        console.print("[dim]Run 'pakt setup' to configure[/]")
 
     console.print(f"\n[dim]Config directory: {config_dir}[/]")
 
@@ -279,9 +416,12 @@ def status():
 def serve(host: str, port: int, tray: bool | None):
     """Start the web interface."""
     import os
+    import signal
+
     import uvicorn
 
     from pakt.web import create_app
+    from pakt.web.app import sync_state
 
     # Only show tray when explicitly requested with --tray
     show_tray = tray is True
@@ -325,6 +465,19 @@ def serve(host: str, port: int, tray: bool | None):
 
     app = create_app()
 
+    # Handle Ctrl+C gracefully - cancel sync if running
+    def handle_sigint(signum, frame):
+        if sync_state["running"]:
+            if not silent_mode:
+                console.print("\n[yellow]Cancelling sync...[/]")
+            sync_state["cancelled"] = True
+        else:
+            if not silent_mode:
+                console.print("\n[dim]Shutting down...[/]")
+            raise KeyboardInterrupt
+
+    signal.signal(signal.SIGINT, handle_sigint)
+
     try:
         log_level = "critical" if silent_mode else "warning"
         uvicorn.run(app, host=host, port=port, log_level=log_level)
@@ -334,10 +487,11 @@ def serve(host: str, port: int, tray: bool | None):
 
 
 @main.command()
+@click.option("--server", help="Server name (defaults to first enabled server)")
 @click.option("--movie", "-m", multiple=True, help="Movie libraries to sync (can specify multiple)")
 @click.option("--show", "-s", multiple=True, help="Show libraries to sync (can specify multiple)")
 @click.option("--all", "sync_all", is_flag=True, help="Sync all libraries (clear selection)")
-def libraries(movie: tuple[str, ...], show: tuple[str, ...], sync_all: bool):
+def libraries(server: str | None, movie: tuple[str, ...], show: tuple[str, ...], sync_all: bool):
     """Configure which Plex libraries to sync.
 
     Run without options to see available libraries and current selection.
@@ -346,13 +500,24 @@ def libraries(movie: tuple[str, ...], show: tuple[str, ...], sync_all: bool):
 
     config = Config.load()
 
-    if not config.plex.url or not config.plex.token:
-        console.print("[red]Error:[/] Plex not configured. Run 'pakt setup' first.")
-        return
+    # Find the target server
+    if server:
+        server_config = config.get_server(server)
+        if not server_config:
+            console.print(f"[red]Error:[/] Server '{server}' not found")
+            return
+    else:
+        enabled = config.get_enabled_servers()
+        if not enabled:
+            console.print("[red]Error:[/] No servers configured. Run 'pakt setup' first.")
+            return
+        server_config = enabled[0]
+
+    console.print(f"[dim]Server: {server_config.name}[/]\n")
 
     # Connect to Plex to get available libraries
     try:
-        plex = PlexClient(config.plex)
+        plex = PlexClient(server_config)
         plex.connect()
     except Exception as e:
         console.print(f"[red]Error connecting to Plex:[/] {e}")
@@ -364,8 +529,8 @@ def libraries(movie: tuple[str, ...], show: tuple[str, ...], sync_all: bool):
     # If options provided, update config
     if movie or show or sync_all:
         if sync_all:
-            config.sync.movie_libraries = []
-            config.sync.show_libraries = []
+            server_config.movie_libraries = []
+            server_config.show_libraries = []
             console.print("[green]✓[/] Set to sync all libraries")
         else:
             if movie:
@@ -373,13 +538,13 @@ def libraries(movie: tuple[str, ...], show: tuple[str, ...], sync_all: bool):
                 invalid = [m for m in movie if m not in available_movie_libs]
                 if invalid:
                     console.print(f"[yellow]Warning:[/] Unknown movie libraries: {', '.join(invalid)}")
-                config.sync.movie_libraries = [m for m in movie if m in available_movie_libs]
+                server_config.movie_libraries = [m for m in movie if m in available_movie_libs]
 
             if show:
                 invalid = [s for s in show if s not in available_show_libs]
                 if invalid:
                     console.print(f"[yellow]Warning:[/] Unknown show libraries: {', '.join(invalid)}")
-                config.sync.show_libraries = [s for s in show if s in available_show_libs]
+                server_config.show_libraries = [s for s in show if s in available_show_libs]
 
         config.save()
         console.print("[green]✓[/] Configuration saved")
@@ -391,8 +556,8 @@ def libraries(movie: tuple[str, ...], show: tuple[str, ...], sync_all: bool):
     table.add_column("Library")
     table.add_column("Status")
 
-    current_movie = config.sync.movie_libraries or []
-    current_show = config.sync.show_libraries or []
+    current_movie = server_config.movie_libraries or []
+    current_show = server_config.show_libraries or []
     sync_all_movies = len(current_movie) == 0
     sync_all_shows = len(current_show) == 0
 
@@ -416,6 +581,233 @@ def libraries(movie: tuple[str, ...], show: tuple[str, ...], sync_all: bool):
         console.print("\n[dim]All libraries selected (default)[/]")
     console.print("\n[dim]Use --movie/-m and --show/-s to select specific libraries[/]")
     console.print("[dim]Use --all to reset to syncing all libraries[/]")
+
+
+@main.group()
+def servers():
+    """Manage Plex server configurations."""
+    pass
+
+
+@servers.command("list")
+def servers_list():
+    """List configured Plex servers."""
+    config = Config.load()
+
+    if not config.servers:
+        console.print("[yellow]No servers configured.[/]")
+        console.print("\nRun [cyan]pakt setup[/] to configure servers via PIN auth")
+        console.print("Or run [cyan]pakt servers add[/] to add servers manually")
+        return
+
+    table = Table(title="Configured Servers")
+    table.add_column("Name", style="cyan")
+    table.add_column("Server Name")
+    table.add_column("URL")
+    table.add_column("Status")
+
+    for server in config.servers:
+        status = "[green]Enabled[/]" if server.enabled else "[dim]Disabled[/]"
+        url = server.url[:40] + "..." if len(server.url) > 40 else server.url
+        table.add_row(server.name, server.server_name or "-", url or "-", status)
+
+    console.print(table)
+
+    if config.plex_token:
+        console.print("\n[dim]Account token: configured[/]")
+
+
+@servers.command("discover")
+def servers_discover():
+    """Discover available Plex servers from your account."""
+    from pakt.plex import discover_servers
+
+    config = Config.load()
+
+    if not config.plex_token:
+        console.print("[red]Error:[/] No Plex account token configured.")
+        console.print("Run [cyan]pakt setup[/] to link your Plex account.")
+        return
+
+    console.print("[dim]Discovering servers...[/]")
+    try:
+        discovered = discover_servers(config.plex_token)
+    except Exception as e:
+        console.print(f"[red]Error:[/] {e}")
+        return
+
+    if not discovered:
+        console.print("[yellow]No servers found on your account[/]")
+        return
+
+    console.print(f"\n[green]Found {len(discovered)} server(s):[/]\n")
+
+    table = Table()
+    table.add_column("#", style="dim")
+    table.add_column("Name", style="cyan")
+    table.add_column("Owned")
+    table.add_column("Local")
+    table.add_column("Configured")
+
+    for i, server in enumerate(discovered, 1):
+        owned = "[green]Yes[/]" if server.owned else "[dim]No[/]"
+        local = "[cyan]Yes[/]" if server.has_local_connection else "[dim]No[/]"
+        configured = "[green]Yes[/]" if config.get_server(server.name) else "[dim]No[/]"
+        table.add_row(str(i), server.name, owned, local, configured)
+
+    console.print(table)
+    console.print("\n[dim]Use 'pakt servers add NAME' to add a discovered server[/]")
+
+
+@servers.command("add")
+@click.argument("name")
+@click.option("--url", help="Server URL (for manual entry)")
+@click.option("--token", "server_token", help="Server token (for manual entry)")
+@click.option("--disabled", is_flag=True, help="Add server as disabled")
+def servers_add(name: str, url: str | None, server_token: str | None, disabled: bool):
+    """Add a Plex server.
+
+    NAME can be:
+    - The name of a discovered server (from 'pakt servers discover')
+    - Any name if --url and --token are provided for manual entry
+    """
+    from pakt.plex import discover_servers
+
+    config = Config.load()
+
+    # Check if already exists
+    if config.get_server(name):
+        console.print(f"[yellow]Server '{name}' already configured.[/]")
+        console.print("Use [cyan]pakt servers remove {name}[/] to remove it first.")
+        return
+
+    if url and server_token:
+        # Manual entry
+        new_server = ServerConfig(
+            name=name,
+            url=url,
+            token=server_token,
+            enabled=not disabled,
+        )
+        config.servers.append(new_server)
+        config.save()
+        console.print(f"[green]✓[/] Added server: {name}")
+        return
+
+    # Try to find from discovered servers
+    if not config.plex_token:
+        console.print("[red]Error:[/] No account token. Provide --url and --token for manual entry.")
+        return
+
+    console.print("[dim]Searching for server...[/]")
+    try:
+        discovered = discover_servers(config.plex_token)
+    except Exception as e:
+        console.print(f"[red]Error discovering servers:[/] {e}")
+        return
+
+    # Find matching server
+    matching = None
+    for server in discovered:
+        if server.name.lower() == name.lower():
+            matching = server
+            break
+
+    if not matching:
+        console.print(f"[yellow]Server '{name}' not found in your account.[/]")
+        console.print("\nAvailable servers:")
+        for server in discovered:
+            console.print(f"  - {server.name}")
+        console.print("\nOr use --url and --token for manual entry.")
+        return
+
+    # Add the server
+    new_server = ServerConfig(
+        name=matching.name,
+        server_name=matching.name,
+        url=matching.best_connection_url or "",
+        token=config.plex_token,
+        enabled=not disabled,
+    )
+    config.servers.append(new_server)
+    config.save()
+    console.print(f"[green]✓[/] Added server: {matching.name}")
+
+
+@servers.command("remove")
+@click.argument("name")
+def servers_remove(name: str):
+    """Remove a configured Plex server."""
+    config = Config.load()
+
+    server = config.get_server(name)
+    if not server:
+        console.print(f"[yellow]Server '{name}' not found.[/]")
+        return
+
+    config.servers = [s for s in config.servers if s.name != name]
+    config.save()
+    console.print(f"[green]✓[/] Removed server: {name}")
+
+
+@servers.command("test")
+@click.argument("name")
+def servers_test(name: str):
+    """Test connection to a configured Plex server."""
+    from pakt.plex import PlexClient
+
+    config = Config.load()
+    server = config.get_server(name)
+
+    if not server:
+        console.print(f"[yellow]Server '{name}' not found.[/]")
+        return
+
+    console.print(f"[dim]Testing connection to {name}...[/]")
+
+    try:
+        plex = PlexClient(server)
+        plex.connect()
+        console.print(f"[green]✓[/] Connected to: {plex.server.friendlyName}")
+
+        movie_libs = plex.get_movie_libraries()
+        show_libs = plex.get_show_libraries()
+        console.print(f"[green]✓[/] Movie libraries: {', '.join(movie_libs) or 'none'}")
+        console.print(f"[green]✓[/] Show libraries: {', '.join(show_libs) or 'none'}")
+    except Exception as e:
+        console.print(f"[red]✗ Connection failed:[/] {e}")
+
+
+@servers.command("enable")
+@click.argument("name")
+def servers_enable(name: str):
+    """Enable a server for syncing."""
+    config = Config.load()
+    server = config.get_server(name)
+
+    if not server:
+        console.print(f"[yellow]Server '{name}' not found.[/]")
+        return
+
+    server.enabled = True
+    config.save()
+    console.print(f"[green]✓[/] Enabled server: {name}")
+
+
+@servers.command("disable")
+@click.argument("name")
+def servers_disable(name: str):
+    """Disable a server from syncing."""
+    config = Config.load()
+    server = config.get_server(name)
+
+    if not server:
+        console.print(f"[yellow]Server '{name}' not found.[/]")
+        return
+
+    server.enabled = False
+    config.save()
+    console.print(f"[green]✓[/] Disabled server: {name}")
 
 
 if __name__ == "__main__":

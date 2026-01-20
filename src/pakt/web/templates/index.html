@@ -686,7 +686,38 @@
             <div id="step2" class="wizard-card hidden">
                 <h3>Connect to Plex</h3>
 
-                <div id="step2-config">
+                <div id="step2-start">
+                    <p style="color: var(--text-dim); margin-bottom: 1.5rem;">
+                        Link your Plex account to automatically discover your servers.
+                    </p>
+                    <button class="btn-primary btn-block btn-lg" onclick="startPlexAuth()">
+                        Link Plex Account
+                    </button>
+                    <button class="btn-secondary btn-block mt-1" onclick="showManualPlexSetup()">
+                        Enter token manually
+                    </button>
+                </div>
+
+                <div id="step2-auth" class="hidden">
+                    <div class="auth-display">
+                        <div class="url">Go to: <a href="https://plex.tv/link" target="_blank">https://plex.tv/link</a></div>
+                        <div class="code" id="plex-auth-code"></div>
+                        <div class="waiting syncing">Waiting for authorization...</div>
+                    </div>
+                </div>
+
+                <div id="step2-servers" class="hidden">
+                    <div class="success-box" style="margin-bottom: 1rem;">
+                        Plex account linked!
+                    </div>
+                    <h4 style="margin-bottom: 0.75rem;">Select servers to sync:</h4>
+                    <div id="discovered-servers" style="margin-bottom: 1rem;"></div>
+                    <button class="btn-success btn-block btn-lg" onclick="addSelectedServers()">
+                        Continue
+                    </button>
+                </div>
+
+                <div id="step2-manual" class="hidden">
                     <div class="help-text">
                         <strong>To find your Plex token:</strong>
                         <ol>
@@ -711,12 +742,15 @@
                     <button class="btn-primary btn-block btn-lg" onclick="testAndSavePlex()">
                         Connect to Plex
                     </button>
+                    <button class="btn-secondary btn-block mt-1" onclick="cancelManualPlexSetup()">
+                        Back to PIN login
+                    </button>
                     <div id="plex-test-result" class="result-box mt-2 hidden"></div>
                 </div>
 
                 <div id="step2-done" class="hidden">
                     <div class="success-box">
-                        <div id="plex-server-name">Plex connected!</div>
+                        <div id="plex-setup-result">Plex connected!</div>
                     </div>
                     <button class="btn-success btn-block btn-lg" onclick="finishSetup()">
                         Start Using Pakt
@@ -753,36 +787,44 @@
 
                     <!-- Sync Options -->
                     <div class="card">
-                        <h2>Options</h2>
+                        <h2>Default Sync Options</h2>
                         <div class="card-content">
-                            <label class="toggle">
-                                <input type="checkbox" id="watched-plex-to-trakt" checked onchange="saveSyncOptions()">
-                                <span>Watched: Plex → Trakt</span>
-                            </label>
-                            <label class="toggle">
-                                <input type="checkbox" id="watched-trakt-to-plex" checked onchange="saveSyncOptions()">
-                                <span>Watched: Trakt → Plex</span>
-                            </label>
-                            <label class="toggle">
-                                <input type="checkbox" id="ratings-plex-to-trakt" checked onchange="saveSyncOptions()">
-                                <span>Ratings: Plex → Trakt</span>
-                            </label>
-                            <label class="toggle">
-                                <input type="checkbox" id="ratings-trakt-to-plex" checked onchange="saveSyncOptions()">
-                                <span>Ratings: Trakt → Plex</span>
-                            </label>
-                            <label class="toggle">
-                                <input type="checkbox" id="collection-plex-to-trakt" onchange="saveSyncOptions()">
-                                <span>Collection: Plex → Trakt</span>
-                            </label>
-                            <label class="toggle">
-                                <input type="checkbox" id="watchlist-plex-to-trakt" onchange="saveSyncOptions()">
-                                <span>Watchlist: Plex → Trakt</span>
-                            </label>
-                            <label class="toggle">
-                                <input type="checkbox" id="watchlist-trakt-to-plex" onchange="saveSyncOptions()">
-                                <span>Watchlist: Trakt → Plex</span>
-                            </label>
+                            <div style="display: flex; gap: 2rem; flex-wrap: wrap;">
+                                <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                                    <div style="font-size: 0.75rem; color: var(--text-dim);">Plex → Trakt</div>
+                                    <label class="toggle">
+                                        <input type="checkbox" id="watched-plex-to-trakt" checked onchange="saveSyncOptions()">
+                                        <span>Watched</span>
+                                    </label>
+                                    <label class="toggle">
+                                        <input type="checkbox" id="ratings-plex-to-trakt" checked onchange="saveSyncOptions()">
+                                        <span>Ratings</span>
+                                    </label>
+                                    <label class="toggle">
+                                        <input type="checkbox" id="collection-plex-to-trakt" onchange="saveSyncOptions()">
+                                        <span>Collection</span>
+                                    </label>
+                                    <label class="toggle">
+                                        <input type="checkbox" id="watchlist-plex-to-trakt" onchange="saveSyncOptions()">
+                                        <span>Watchlist</span>
+                                    </label>
+                                </div>
+                                <div style="display: flex; flex-direction: column; gap: 0.5rem;">
+                                    <div style="font-size: 0.75rem; color: var(--text-dim);">Trakt → Plex</div>
+                                    <label class="toggle">
+                                        <input type="checkbox" id="watched-trakt-to-plex" checked onchange="saveSyncOptions()">
+                                        <span>Watched</span>
+                                    </label>
+                                    <label class="toggle">
+                                        <input type="checkbox" id="ratings-trakt-to-plex" checked onchange="saveSyncOptions()">
+                                        <span>Ratings</span>
+                                    </label>
+                                    <label class="toggle">
+                                        <input type="checkbox" id="watchlist-trakt-to-plex" onchange="saveSyncOptions()">
+                                        <span>Watchlist</span>
+                                    </label>
+                                </div>
+                            </div>
                             <div id="sync-options-status" class="mt-1" style="font-size: 0.8rem; color: var(--text-dim);"></div>
                         </div>
                     </div>
@@ -868,20 +910,9 @@
                 </div>
 
                 <div class="card mt-2">
-                    <h2>Plex Server</h2>
-                    <div class="card-content">
-                        <div class="row">
-                            <span class="label">Server</span>
-                            <span id="plex-server-name" class="value">-</span>
-                        </div>
-                        <div class="row">
-                            <span class="label">Movies</span>
-                            <span id="plex-movie-count" class="value">-</span>
-                        </div>
-                        <div class="row">
-                            <span class="label">Shows</span>
-                            <span id="plex-show-count" class="value">-</span>
-                        </div>
+                    <h2>Plex Servers</h2>
+                    <div id="plex-servers-stats" class="card-content">
+                        <span style="color: var(--text-dim);">Loading...</span>
                     </div>
                 </div>
             </div>
@@ -920,6 +951,28 @@
                         </div>
                     </div>
 
+                    <!-- Servers - full width -->
+                    <div class="card" style="grid-column: 1 / -1;">
+                        <h2>Servers</h2>
+                        <div class="card-content">
+                            <p style="color: var(--text-dim); font-size: 0.875rem; margin-bottom: 1rem;">
+                                Manage your Plex servers for sync.
+                            </p>
+                            <div id="servers-list" style="margin-bottom: 1rem;"></div>
+                            <div style="display: flex; gap: 0.5rem;">
+                                <button class="btn-secondary" onclick="refreshServersInSettings()">Refresh</button>
+                                <button class="btn-primary" onclick="startPlexReauth()">Re-Link Account</button>
+                            </div>
+                            <div id="servers-reauth" class="hidden mt-2">
+                                <div class="auth-display" style="padding: 1rem;">
+                                    <div class="url">Go to: <a href="https://plex.tv/link" target="_blank">https://plex.tv/link</a></div>
+                                    <div class="code" id="reauth-pin-code" style="font-size: 1.5rem;"></div>
+                                    <div class="waiting syncing" style="font-size: 0.875rem;">Waiting...</div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
                     <!-- Scheduler - full width -->
                     <div class="card" style="grid-column: 1 / -1;">
                         <h2>Scheduler</h2>
@@ -945,27 +998,15 @@
                         </div>
                     </div>
 
-                    <!-- Libraries - full width -->
+                    <!-- Per-Server Settings - full width -->
                     <div class="card" style="grid-column: 1 / -1;">
-                        <h2>Libraries</h2>
+                        <h2>Server Settings</h2>
                         <div class="card-content">
                             <p style="color: var(--text-dim); font-size: 0.875rem; margin-bottom: 1rem;">
-                                Select which Plex libraries to sync. Leave unchecked to sync all.
+                                Configure libraries and sync options per server. Sync options default to global settings above.
                             </p>
                             <div id="libraries-loading" style="color: var(--text-dim);">Loading libraries...</div>
-                            <div id="libraries-container" class="hidden">
-                                <div class="grid" style="gap: 1rem;">
-                                    <div>
-                                        <h3 style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 0.75rem;">Movie Libraries</h3>
-                                        <div id="movie-libraries"></div>
-                                    </div>
-                                    <div>
-                                        <h3 style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 0.75rem;">Show Libraries</h3>
-                                        <div id="show-libraries"></div>
-                                    </div>
-                                </div>
-                                <div id="libraries-status" class="mt-2" style="font-size: 0.8rem; color: var(--text-dim);"></div>
-                            </div>
+                            <div id="libraries-container" class="hidden"></div>
                             <div id="libraries-error" class="hidden" style="color: var(--error);"></div>
                         </div>
                     </div>
@@ -992,7 +1033,9 @@
 
     <script>
         let isConfigured = false;
+        let syncPolling = false;
         let currentView = 'sync';
+        let wizardInProgress = false;  // Prevents auto-switch to dashboard during setup
 
         function showView(viewName) {
             currentView = viewName;
@@ -1013,6 +1056,7 @@
             if (viewName === 'settings') {
                 document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
                 loadLibraries();
+                refreshServersInSettings();
             }
         }
 
@@ -1023,11 +1067,23 @@
 
                 isConfigured = data.trakt_authenticated && data.plex_configured;
 
-                // Update badge
+                // Update badge and sync UI state
                 const badge = document.getElementById('status-badge');
                 if (data.sync_running) {
                     badge.textContent = 'Syncing...';
                     badge.className = 'status-badge running';
+                    // Resume sync UI state after page refresh
+                    document.getElementById('sync-btn').disabled = true;
+                    document.getElementById('sync-btn').textContent = 'Syncing...';
+                    document.getElementById('dry-run-btn').classList.add('hidden');
+                    document.getElementById('cancel-btn').classList.remove('hidden');
+                    document.getElementById('verbose-logging').disabled = true;
+                    document.getElementById('progress-container').classList.remove('hidden');
+                    // Start polling if not already
+                    if (!syncPolling) {
+                        syncPolling = true;
+                        pollSyncStatus();
+                    }
                 } else if (isConfigured) {
                     badge.textContent = 'Ready';
                     badge.className = 'status-badge ok';
@@ -1037,12 +1093,13 @@
                 }
 
                 // Show wizard or dashboard
-                if (isConfigured) {
+                if (isConfigured && !wizardInProgress) {
                     document.getElementById('wizard').classList.add('hidden');
                     document.getElementById('dashboard').classList.remove('hidden');
                     document.getElementById('main-nav').classList.remove('hidden');
                     document.getElementById('settings-btn').classList.remove('hidden');
-                } else {
+                } else if (!isConfigured) {
+                    wizardInProgress = true;
                     document.getElementById('wizard').classList.remove('hidden');
                     document.getElementById('dashboard').classList.add('hidden');
                     document.getElementById('main-nav').classList.add('hidden');
@@ -1154,24 +1211,156 @@
             document.getElementById('step1-indicator').classList.add('done');
             document.getElementById('step2-indicator').classList.add('active');
 
-            // Try to auto-detect local Plex
+            // Check if already configured
             tryDetectPlex();
         }
 
         async function tryDetectPlex() {
             try {
+                // Check if servers are configured
+                const serversResp = await fetch('/api/servers');
+                const serversData = await serversResp.json();
+                if (serversData.servers && serversData.servers.length > 0) {
+                    document.getElementById('step2-start').classList.add('hidden');
+                    document.getElementById('step2-done').classList.remove('hidden');
+                    document.getElementById('plex-setup-result').textContent =
+                        `${serversData.servers.length} server(s) configured`;
+                    return;
+                }
+
+                // Check legacy config
                 const resp = await fetch('/api/plex/test', {method: 'POST'});
                 const data = await resp.json();
                 if (data.status === 'ok') {
-                    // Already configured, show success
-                    document.getElementById('step2-config').classList.add('hidden');
+                    document.getElementById('step2-start').classList.add('hidden');
                     document.getElementById('step2-done').classList.remove('hidden');
-                    document.getElementById('plex-server-name').textContent =
+                    document.getElementById('plex-setup-result').textContent =
                         `Connected to ${data.server_name}`;
                 }
             } catch (e) {
-                // Not configured, show form
+                // Not configured, show start screen
             }
+        }
+
+        let plexPinId = null;
+        let discoveredServers = [];
+
+        async function startPlexAuth() {
+            document.getElementById('step2-start').classList.add('hidden');
+            document.getElementById('step2-auth').classList.remove('hidden');
+
+            try {
+                const resp = await fetch('/api/plex/pin', {method: 'POST'});
+                const data = await resp.json();
+
+                if (data.status !== 'ok') {
+                    alert(data.message || 'Failed to start PIN login');
+                    document.getElementById('step2-start').classList.remove('hidden');
+                    document.getElementById('step2-auth').classList.add('hidden');
+                    return;
+                }
+
+                document.getElementById('plex-auth-code').textContent = data.pin;
+                plexPinId = data.pin_id;
+
+                // Poll for completion
+                pollPlexAuth();
+            } catch (e) {
+                alert('Error: ' + e.message);
+                document.getElementById('step2-start').classList.remove('hidden');
+                document.getElementById('step2-auth').classList.add('hidden');
+            }
+        }
+
+        async function pollPlexAuth() {
+            if (!plexPinId) return;
+
+            try {
+                const resp = await fetch(`/api/plex/pin/${plexPinId}`);
+                const data = await resp.json();
+
+                if (data.status === 'authenticated') {
+                    // Success - discover servers
+                    document.getElementById('step2-auth').classList.add('hidden');
+                    await discoverServers();
+                } else if (data.status === 'pending') {
+                    setTimeout(pollPlexAuth, 2000);
+                } else {
+                    alert(data.message || 'Authentication failed');
+                    document.getElementById('step2-start').classList.remove('hidden');
+                    document.getElementById('step2-auth').classList.add('hidden');
+                }
+            } catch (e) {
+                setTimeout(pollPlexAuth, 3000);
+            }
+        }
+
+        async function discoverServers() {
+            try {
+                const resp = await fetch('/api/plex/discover');
+                const data = await resp.json();
+
+                if (data.status !== 'ok' || !data.servers || data.servers.length === 0) {
+                    // No servers found, go straight to done
+                    document.getElementById('step2-done').classList.remove('hidden');
+                    document.getElementById('plex-setup-result').textContent = 'Plex account linked (no servers found)';
+                    return;
+                }
+
+                discoveredServers = data.servers;
+                renderDiscoveredServers();
+                document.getElementById('step2-servers').classList.remove('hidden');
+            } catch (e) {
+                document.getElementById('step2-done').classList.remove('hidden');
+                document.getElementById('plex-setup-result').textContent = 'Plex account linked';
+            }
+        }
+
+        function renderDiscoveredServers() {
+            const container = document.getElementById('discovered-servers');
+            container.innerHTML = discoveredServers.map((server, i) => {
+                const owned = server.owned ? '<span style="color: var(--success);">(owned)</span>' : '<span style="color: var(--text-dim);">(shared)</span>';
+                const local = server.has_local ? '<span style="color: var(--accent);">local</span>' : '';
+                return `<label class="toggle" style="margin-bottom: 0.5rem;">
+                    <input type="checkbox" data-server="${escapeHtml(server.name)}" checked>
+                    <span>${escapeHtml(server.name)} ${owned} ${local}</span>
+                </label>`;
+            }).join('');
+        }
+
+        async function addSelectedServers() {
+            const selected = [];
+            document.querySelectorAll('#discovered-servers input[type="checkbox"]:checked').forEach(el => {
+                selected.push(el.dataset.server);
+            });
+
+            // Add each selected server
+            for (const serverName of selected) {
+                try {
+                    await fetch('/api/servers', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({name: serverName, server_name: serverName})
+                    });
+                } catch (e) {
+                    console.error('Failed to add server:', serverName, e);
+                }
+            }
+
+            document.getElementById('step2-servers').classList.add('hidden');
+            document.getElementById('step2-done').classList.remove('hidden');
+            document.getElementById('plex-setup-result').textContent =
+                `Added ${selected.length} server(s)`;
+        }
+
+        function showManualPlexSetup() {
+            document.getElementById('step2-start').classList.add('hidden');
+            document.getElementById('step2-manual').classList.remove('hidden');
+        }
+
+        function cancelManualPlexSetup() {
+            document.getElementById('step2-manual').classList.add('hidden');
+            document.getElementById('step2-start').classList.remove('hidden');
         }
 
         async function testAndSavePlex() {
@@ -1215,9 +1404,9 @@
             const data = await resp.json();
 
             if (data.status === 'ok') {
-                document.getElementById('step2-config').classList.add('hidden');
+                document.getElementById('step2-manual').classList.add('hidden');
                 document.getElementById('step2-done').classList.remove('hidden');
-                document.getElementById('plex-server-name').textContent =
+                document.getElementById('plex-setup-result').textContent =
                     `Connected to ${data.server_name}`;
             } else {
                 resultBox.textContent = 'Error: ' + data.message;
@@ -1225,6 +1414,7 @@
         }
 
         function finishSetup() {
+            wizardInProgress = false;
             document.getElementById('wizard').classList.add('hidden');
             document.getElementById('dashboard').classList.remove('hidden');
             document.getElementById('main-nav').classList.remove('hidden');
@@ -1244,6 +1434,7 @@
 
         function confirmReconfigure() {
             closeModal();
+            wizardInProgress = true;
 
             document.getElementById('dashboard').classList.add('hidden');
             document.getElementById('wizard').classList.remove('hidden');
@@ -1390,6 +1581,7 @@
             btn.textContent = 'Syncing...';
             dryBtn.classList.add('hidden');
             cancelBtn.classList.remove('hidden');
+            document.getElementById('verbose-logging').disabled = true;
 
             clearConsole();
             logToConsole(dryRun ? 'Starting dry run...' : 'Starting sync...', 'info');
@@ -1403,6 +1595,7 @@
                 const data = await resp.json();
 
                 if (data.status === 'started') {
+                    syncPolling = true;
                     pollSyncStatus();
                 } else {
                     logToConsole(data.message || 'Error starting sync', 'error');
@@ -1418,6 +1611,7 @@
             document.getElementById('sync-btn').disabled = false;
             document.getElementById('sync-btn').textContent = 'Start Sync';
             document.getElementById('dry-run-btn').classList.remove('hidden');
+            document.getElementById('verbose-logging').disabled = false;
             const cancelBtn = document.getElementById('cancel-btn');
             cancelBtn.classList.add('hidden');
             cancelBtn.disabled = false;
@@ -1469,6 +1663,7 @@
                 if (data.running) {
                     setTimeout(poll, 250);
                 } else {
+                    syncPolling = false;
                     hideProgress();
                     resetSyncButtons();
                     loadStatus();
@@ -1559,29 +1754,200 @@
         }
 
         async function loadPlexServer() {
+            const container = document.getElementById('plex-servers-stats');
             try {
-                const resp = await fetch('/api/plex/test', {method: 'POST'});
-                const data = await resp.json();
-                if (data.status === 'ok') {
-                    document.getElementById('plex-server-name').textContent = data.server_name || 'Unknown';
-                    const movieCount = data.movie_libraries ? data.movie_libraries.length : 0;
-                    const showCount = data.show_libraries ? data.show_libraries.length : 0;
-                    document.getElementById('plex-movie-count').textContent = movieCount + ' libraries';
-                    document.getElementById('plex-show-count').textContent = showCount + ' libraries';
-                } else {
-                    document.getElementById('plex-server-name').textContent = 'Error';
-                    document.getElementById('plex-movie-count').textContent = '-';
-                    document.getElementById('plex-show-count').textContent = '-';
+                const serversResp = await fetch('/api/servers');
+                const serversData = await serversResp.json();
+
+                if (serversData.status !== 'ok' || !serversData.servers.length) {
+                    container.innerHTML = '<span style="color: var(--text-dim);">No servers configured</span>';
+                    return;
                 }
+
+                let html = '';
+                for (const server of serversData.servers) {
+                    const statusClass = server.enabled ? 'success' : 'warning';
+                    const statusText = server.enabled ? 'Enabled' : 'Disabled';
+
+                    // Try to get library counts
+                    let movieCount = '-';
+                    let showCount = '-';
+                    try {
+                        const libResp = await fetch(`/api/servers/${encodeURIComponent(server.name)}/libraries`);
+                        const libData = await libResp.json();
+                        if (libData.status === 'ok') {
+                            const movieTotal = libData.available.movie.length;
+                            const showTotal = libData.available.show.length;
+                            // Empty selected = all enabled
+                            const movieEnabled = libData.selected.movie.length === 0 ? movieTotal : libData.selected.movie.length;
+                            const showEnabled = libData.selected.show.length === 0 ? showTotal : libData.selected.show.length;
+
+                            movieCount = movieEnabled === movieTotal
+                                ? `${movieTotal} libraries`
+                                : `${movieTotal} libraries (${movieEnabled} enabled)`;
+                            showCount = showEnabled === showTotal
+                                ? `${showTotal} libraries`
+                                : `${showTotal} libraries (${showEnabled} enabled)`;
+                        }
+                    } catch (e) {
+                        console.error(`Failed to load libraries for ${server.name}:`, e);
+                    }
+
+                    html += `<div style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border);">
+                        <div class="row">
+                            <span class="label">Server</span>
+                            <span class="value">${escapeHtml(server.name)}</span>
+                        </div>
+                        <div class="row">
+                            <span class="label">Status</span>
+                            <span class="value ${statusClass}">${statusText}</span>
+                        </div>
+                        <div class="row">
+                            <span class="label">Movies</span>
+                            <span class="value">${movieCount}</span>
+                        </div>
+                        <div class="row">
+                            <span class="label">Shows</span>
+                            <span class="value">${showCount}</span>
+                        </div>
+                    </div>`;
+                }
+                // Remove last border
+                container.innerHTML = html.replace(/border-bottom: 1px solid var\(--border\);">([^<]*<\/div>\s*)$/, '">$1');
             } catch (e) {
-                document.getElementById('plex-server-name').textContent = 'Error';
-                console.error('Failed to load Plex server:', e);
+                container.innerHTML = '<span style="color: var(--error);">Error loading servers</span>';
+                console.error('Failed to load Plex servers:', e);
             }
         }
 
-        // Library selection
-        let availableLibraries = { movie: [], show: [] };
-        let selectedLibraries = { movie: [], show: [] };
+        // Server management
+        let settingsPinId = null;
+
+        async function refreshServersInSettings() {
+            const container = document.getElementById('servers-list');
+            container.innerHTML = '<span style="color: var(--text-dim);">Loading...</span>';
+
+            try {
+                const resp = await fetch('/api/servers');
+                const data = await resp.json();
+
+                if (!data.servers || data.servers.length === 0) {
+                    container.innerHTML = '<span style="color: var(--text-dim);">No servers configured.</span>';
+                    return;
+                }
+
+                container.innerHTML = data.servers.map(server => {
+                    const status = server.enabled
+                        ? '<span style="color: var(--success);">Enabled</span>'
+                        : '<span style="color: var(--text-dim);">Disabled</span>';
+                    return `<div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border);">
+                        <div>
+                            <strong>${escapeHtml(server.name)}</strong>
+                            <span style="margin-left: 0.5rem; font-size: 0.8rem;">${status}</span>
+                        </div>
+                        <div style="display: flex; gap: 0.5rem;">
+                            <button class="btn-secondary" style="padding: 0.25rem 0.5rem; font-size: 0.8rem;"
+                                onclick="toggleServer('${escapeHtml(server.name)}', ${!server.enabled})">
+                                ${server.enabled ? 'Disable' : 'Enable'}
+                            </button>
+                            <button class="btn-secondary" style="padding: 0.25rem 0.5rem; font-size: 0.8rem; color: var(--error);"
+                                onclick="removeServer('${escapeHtml(server.name)}')">
+                                Remove
+                            </button>
+                        </div>
+                    </div>`;
+                }).join('');
+            } catch (e) {
+                container.innerHTML = '<span style="color: var(--error);">Error loading servers</span>';
+            }
+        }
+
+        async function toggleServer(name, enabled) {
+            await fetch(`/api/servers/${encodeURIComponent(name)}`, {
+                method: 'PUT',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({enabled})
+            });
+            refreshServersInSettings();
+        }
+
+        async function removeServer(name) {
+            if (!confirm(`Remove server "${name}"?`)) return;
+            await fetch(`/api/servers/${encodeURIComponent(name)}`, {method: 'DELETE'});
+            refreshServersInSettings();
+        }
+
+        async function startPlexReauth() {
+            document.getElementById('servers-reauth').classList.remove('hidden');
+
+            try {
+                const resp = await fetch('/api/plex/pin', {method: 'POST'});
+                const data = await resp.json();
+
+                if (data.status !== 'ok') {
+                    alert(data.message || 'Failed to start PIN login');
+                    document.getElementById('servers-reauth').classList.add('hidden');
+                    return;
+                }
+
+                document.getElementById('reauth-pin-code').textContent = data.pin;
+                settingsPinId = data.pin_id;
+                pollSettingsPlexAuth();
+            } catch (e) {
+                alert('Error: ' + e.message);
+                document.getElementById('servers-reauth').classList.add('hidden');
+            }
+        }
+
+        async function pollSettingsPlexAuth() {
+            if (!settingsPinId) return;
+
+            try {
+                const resp = await fetch(`/api/plex/pin/${settingsPinId}`);
+                const data = await resp.json();
+
+                if (data.status === 'authenticated') {
+                    document.getElementById('servers-reauth').classList.add('hidden');
+                    settingsPinId = null;
+                    // Discover and add servers
+                    await discoverAndAddServers();
+                } else if (data.status === 'pending') {
+                    setTimeout(pollSettingsPlexAuth, 2000);
+                } else {
+                    alert(data.message || 'Authentication failed');
+                    document.getElementById('servers-reauth').classList.add('hidden');
+                }
+            } catch (e) {
+                setTimeout(pollSettingsPlexAuth, 3000);
+            }
+        }
+
+        async function discoverAndAddServers() {
+            try {
+                const resp = await fetch('/api/plex/discover');
+                const data = await resp.json();
+
+                if (data.status === 'ok' && data.servers) {
+                    // Add any new servers
+                    for (const server of data.servers) {
+                        if (!server.configured) {
+                            await fetch('/api/servers', {
+                                method: 'POST',
+                                headers: {'Content-Type': 'application/json'},
+                                body: JSON.stringify({name: server.name, server_name: server.name})
+                            });
+                        }
+                    }
+                }
+                refreshServersInSettings();
+            } catch (e) {
+                refreshServersInSettings();
+            }
+        }
+
+        // Library and sync options (per-server)
+        let serverData = {};  // {serverName: {libraries, sync, enabled}}
+        let globalSync = {};
 
         async function loadLibraries() {
             const loading = document.getElementById('libraries-loading');
@@ -1593,20 +1959,41 @@
             error.classList.add('hidden');
 
             try {
-                const resp = await fetch('/api/plex/libraries');
-                const data = await resp.json();
+                // Get list of servers with sync options
+                const serversResp = await fetch('/api/servers');
+                const serversResult = await serversResp.json();
 
-                if (data.status === 'ok') {
-                    availableLibraries = data.available;
-                    selectedLibraries = data.selected;
-                    renderLibraryCheckboxes();
-                    loading.classList.add('hidden');
-                    container.classList.remove('hidden');
-                } else {
+                if (serversResult.status !== 'ok' || !serversResult.servers.length) {
                     loading.classList.add('hidden');
                     error.classList.remove('hidden');
-                    error.textContent = data.message || 'Failed to load libraries';
+                    error.textContent = 'No servers configured';
+                    return;
                 }
+
+                globalSync = serversResult.global_sync || {};
+
+                // Load libraries for each server
+                serverData = {};
+                for (const server of serversResult.servers) {
+                    try {
+                        const resp = await fetch(`/api/servers/${encodeURIComponent(server.name)}/libraries`);
+                        const data = await resp.json();
+                        if (data.status === 'ok') {
+                            serverData[server.name] = {
+                                available: data.available,
+                                selected: data.selected,
+                                enabled: server.enabled,
+                                sync: server.sync || {}
+                            };
+                        }
+                    } catch (e) {
+                        console.error(`Failed to load libraries for ${server.name}:`, e);
+                    }
+                }
+
+                renderServerSettings();
+                loading.classList.add('hidden');
+                container.classList.remove('hidden');
             } catch (e) {
                 loading.classList.add('hidden');
                 error.classList.remove('hidden');
@@ -1614,72 +2001,150 @@
             }
         }
 
-        function renderLibraryCheckboxes() {
-            const movieContainer = document.getElementById('movie-libraries');
-            const showContainer = document.getElementById('show-libraries');
+        function renderServerSettings() {
+            const container = document.getElementById('libraries-container');
+            const serverNames = Object.keys(serverData);
 
-            // Movie libraries
-            if (availableLibraries.movie.length === 0) {
-                movieContainer.innerHTML = '<span style="color: var(--text-dim);">No movie libraries found</span>';
-            } else {
-                movieContainer.innerHTML = availableLibraries.movie.map(lib => {
-                    const checked = selectedLibraries.movie.length === 0 || selectedLibraries.movie.includes(lib);
-                    return `<label class="toggle" style="margin-bottom: 0.5rem;">
-                        <input type="checkbox" data-type="movie" data-lib="${escapeHtml(lib)}" ${checked ? 'checked' : ''} onchange="saveLibrarySelection()">
-                        <span>${escapeHtml(lib)}</span>
-                    </label>`;
-                }).join('');
+            if (serverNames.length === 0) {
+                container.innerHTML = '<span style="color: var(--text-dim);">No servers available</span>';
+                return;
             }
 
-            // Show libraries
-            if (availableLibraries.show.length === 0) {
-                showContainer.innerHTML = '<span style="color: var(--text-dim);">No show libraries found</span>';
-            } else {
-                showContainer.innerHTML = availableLibraries.show.map(lib => {
-                    const checked = selectedLibraries.show.length === 0 || selectedLibraries.show.includes(lib);
-                    return `<label class="toggle" style="margin-bottom: 0.5rem;">
-                        <input type="checkbox" data-type="show" data-lib="${escapeHtml(lib)}" ${checked ? 'checked' : ''} onchange="saveLibrarySelection()">
-                        <span>${escapeHtml(lib)}</span>
-                    </label>`;
-                }).join('');
+            let html = '';
+            for (const serverName of serverNames) {
+                const data = serverData[serverName];
+                const statusClass = data.enabled ? 'success' : 'warning';
+                const statusText = data.enabled ? '' : ' (disabled)';
+                const safeServer = escapeHtml(serverName);
+
+                html += `<div style="margin-bottom: 1.5rem; padding: 1rem; background: var(--bg-secondary); border-radius: 8px;">
+                    <h3 style="font-size: 1rem; margin-bottom: 1rem; display: flex; align-items: center; gap: 0.5rem;">
+                        <span>${safeServer}</span>
+                        <span class="value ${statusClass}" style="font-size: 0.75rem;">${statusText}</span>
+                    </h3>
+
+                    <div style="margin-bottom: 1rem;">
+                        <h4 style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 0.5rem;">Libraries</h4>
+                        <div class="grid" style="gap: 1rem;">
+                            <div>
+                                <h5 style="font-size: 0.8rem; color: var(--text-dim); margin-bottom: 0.25rem;">Movies</h5>
+                                ${renderLibTypeCheckboxes(serverName, 'movie', data.available.movie, data.selected.movie)}
+                            </div>
+                            <div>
+                                <h5 style="font-size: 0.8rem; color: var(--text-dim); margin-bottom: 0.25rem;">Shows</h5>
+                                ${renderLibTypeCheckboxes(serverName, 'show', data.available.show, data.selected.show)}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div style="border-top: 1px solid var(--border); padding-top: 1rem;">
+                        <h4 style="font-size: 0.875rem; color: var(--text-dim); margin-bottom: 0.5rem;">Sync Options <span style="font-size: 0.75rem;">(override global)</span></h4>
+                        <div style="display: flex; gap: 2rem; flex-wrap: wrap;">
+                            <div>
+                                <div style="font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.25rem;">Plex → Trakt</div>
+                                ${renderSyncOption(serverName, 'watched_plex_to_trakt', 'Watched', data.sync)}
+                                ${renderSyncOption(serverName, 'ratings_plex_to_trakt', 'Ratings', data.sync)}
+                                ${renderSyncOption(serverName, 'collection_plex_to_trakt', 'Collection', data.sync)}
+                                ${renderSyncOption(serverName, 'watchlist_plex_to_trakt', 'Watchlist', data.sync)}
+                            </div>
+                            <div>
+                                <div style="font-size: 0.75rem; color: var(--text-dim); margin-bottom: 0.25rem;">Trakt → Plex</div>
+                                ${renderSyncOption(serverName, 'watched_trakt_to_plex', 'Watched', data.sync)}
+                                ${renderSyncOption(serverName, 'ratings_trakt_to_plex', 'Ratings', data.sync)}
+                                ${renderSyncOption(serverName, 'watchlist_trakt_to_plex', 'Watchlist', data.sync)}
+                            </div>
+                        </div>
+                    </div>
+
+                    <div id="server-status-${safeServer}" class="mt-2" style="font-size: 0.8rem; color: var(--text-dim);"></div>
+                </div>`;
             }
+            container.innerHTML = html;
         }
 
-        async function saveLibrarySelection() {
-            const status = document.getElementById('libraries-status');
-            status.textContent = 'Saving...';
-            status.style.color = 'var(--text-dim)';
+        function renderLibTypeCheckboxes(serverName, libType, available, selected) {
+            if (!available || available.length === 0) {
+                return `<span style="color: var(--text-dim);">None found</span>`;
+            }
+            return available.map(lib => {
+                const checked = selected.length === 0 || selected.includes(lib);
+                const safeServer = escapeHtml(serverName);
+                const safeLib = escapeHtml(lib);
+                return `<label class="toggle" style="margin-bottom: 0.5rem;">
+                    <input type="checkbox" data-server="${safeServer}" data-type="${libType}" data-lib="${safeLib}" ${checked ? 'checked' : ''} onchange="saveServerSettings('${safeServer}')">
+                    <span>${safeLib}</span>
+                </label>`;
+            }).join('');
+        }
 
-            // Collect checked libraries
+        function renderSyncOption(serverName, option, label, serverSync) {
+            const safeServer = escapeHtml(serverName);
+            const globalVal = globalSync[option] ?? false;
+            const serverVal = serverSync[option];  // null = use global
+            const globalLabel = globalVal ? 'On' : 'Off';
+
+            // tri-state: null (global), true, false
+            let selectHtml = `<select data-server="${safeServer}" data-sync="${option}" onchange="saveServerSettings('${safeServer}')" style="padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.8rem;">`;
+            selectHtml += `<option value="null" ${serverVal === null || serverVal === undefined ? 'selected' : ''}>Global (${globalLabel})</option>`;
+            selectHtml += `<option value="true" ${serverVal === true ? 'selected' : ''}>On</option>`;
+            selectHtml += `<option value="false" ${serverVal === false ? 'selected' : ''}>Off</option>`;
+            selectHtml += `</select>`;
+
+            return `<div style="display: flex; align-items: center; justify-content: space-between; gap: 0.5rem;">
+                <span style="font-size: 0.85rem;">${label}</span>
+                ${selectHtml}
+            </div>`;
+        }
+
+        async function saveServerSettings(serverName) {
+            const statusEl = document.getElementById(`server-status-${serverName}`);
+            if (statusEl) {
+                statusEl.textContent = 'Saving...';
+                statusEl.style.color = 'var(--text-dim)';
+            }
+
+            const data = serverData[serverName];
+
+            // Collect library selections
             const movieLibs = [];
             const showLibs = [];
-
-            document.querySelectorAll('input[data-type="movie"]:checked').forEach(el => {
+            document.querySelectorAll(`input[data-server="${serverName}"][data-type="movie"]:checked`).forEach(el => {
                 movieLibs.push(el.dataset.lib);
             });
-            document.querySelectorAll('input[data-type="show"]:checked').forEach(el => {
+            document.querySelectorAll(`input[data-server="${serverName}"][data-type="show"]:checked`).forEach(el => {
                 showLibs.push(el.dataset.lib);
             });
+            const allMovies = movieLibs.length === data.available.movie.length;
+            const allShows = showLibs.length === data.available.show.length;
 
-            // If all are checked, send empty array (means "all")
-            const allMoviesChecked = movieLibs.length === availableLibraries.movie.length;
-            const allShowsChecked = showLibs.length === availableLibraries.show.length;
+            // Collect sync overrides
+            const syncOverrides = {};
+            document.querySelectorAll(`select[data-server="${serverName}"][data-sync]`).forEach(el => {
+                const opt = el.dataset.sync;
+                const val = el.value;
+                syncOverrides[opt] = val === 'null' ? null : val === 'true';
+            });
 
-            await fetch('/api/config', {
-                method: 'POST',
+            await fetch(`/api/servers/${encodeURIComponent(serverName)}`, {
+                method: 'PUT',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({
-                    movie_libraries: allMoviesChecked ? [] : movieLibs,
-                    show_libraries: allShowsChecked ? [] : showLibs
+                    movie_libraries: allMovies ? [] : movieLibs,
+                    show_libraries: allShows ? [] : showLibs,
+                    sync: syncOverrides
                 })
             });
 
-            selectedLibraries.movie = allMoviesChecked ? [] : movieLibs;
-            selectedLibraries.show = allShowsChecked ? [] : showLibs;
+            // Update local state
+            data.selected.movie = allMovies ? [] : movieLibs;
+            data.selected.show = allShows ? [] : showLibs;
+            data.sync = syncOverrides;
 
-            status.textContent = allMoviesChecked && allShowsChecked ? 'Saved (syncing all)' : 'Saved';
-            status.style.color = 'var(--success)';
-            setTimeout(() => { status.textContent = ''; }, 2000);
+            if (statusEl) {
+                statusEl.textContent = 'Saved';
+                statusEl.style.color = 'var(--success)';
+                setTimeout(() => { statusEl.textContent = ''; }, 2000);
+            }
         }
 
         async function shutdownServer() {
@@ -1696,9 +2161,166 @@
             }
         }
 
-        // Initial load
-        loadStatus();
-        loadConfig();
+        // Render server settings from init data (no additional fetches)
+        function renderServersFromInit(servers, globalSyncConfig) {
+            globalSync = globalSyncConfig || {};
+            serverData = {};
+
+            for (const server of servers) {
+                const libs = server.libraries || {movie: [], show: []};
+                serverData[server.name] = {
+                    available: {movie: libs.movie || [], show: libs.show || []},
+                    selected: {movie: server.movie_libraries || [], show: server.show_libraries || []},
+                    enabled: server.enabled,
+                    sync: server.sync || {}
+                };
+            }
+
+            renderServerSettings();
+        }
+
+        // Render Plex servers stats from init data (no additional fetches)
+        function renderPlexServersStats(servers) {
+            const container = document.getElementById('plex-servers-stats');
+            if (!container) return;
+
+            if (!servers || servers.length === 0) {
+                container.innerHTML = '<span style="color: var(--text-dim);">No servers configured</span>';
+                return;
+            }
+
+            let html = '';
+            for (const server of servers) {
+                const statusClass = server.enabled ? 'success' : 'warning';
+                const statusText = server.enabled ? 'Enabled' : 'Disabled';
+
+                const libs = server.libraries || {movie: [], show: []};
+                const movieTotal = (libs.movie || []).length;
+                const showTotal = (libs.show || []).length;
+                const movieSelected = (server.movie_libraries || []).length;
+                const showSelected = (server.show_libraries || []).length;
+
+                // Empty selected = all enabled
+                const movieEnabled = movieSelected === 0 ? movieTotal : movieSelected;
+                const showEnabled = showSelected === 0 ? showTotal : showSelected;
+
+                const movieCount = movieEnabled === movieTotal
+                    ? `${movieTotal} libraries`
+                    : `${movieTotal} libraries (${movieEnabled} enabled)`;
+                const showCount = showEnabled === showTotal
+                    ? `${showTotal} libraries`
+                    : `${showTotal} libraries (${showEnabled} enabled)`;
+
+                html += `<div style="margin-bottom: 1rem; padding-bottom: 1rem; border-bottom: 1px solid var(--border);">
+                    <div class="row">
+                        <span class="label">Server</span>
+                        <span class="value">${escapeHtml(server.name)}</span>
+                    </div>
+                    <div class="row">
+                        <span class="label">Status</span>
+                        <span class="value ${statusClass}">${statusText}</span>
+                    </div>
+                    <div class="row">
+                        <span class="label">Movies</span>
+                        <span class="value">${movieCount}</span>
+                    </div>
+                    <div class="row">
+                        <span class="label">Shows</span>
+                        <span class="value">${showCount}</span>
+                    </div>
+                </div>`;
+            }
+            // Remove last border
+            container.innerHTML = html.replace(/border-bottom: 1px solid var\(--border\);">([^<]*<\/div>\s*)$/, '">$1');
+        }
+
+        // Fast initial load using single combined endpoint
+        (async function initialLoad() {
+            try {
+                const resp = await fetch('/api/init');
+                const data = await resp.json();
+
+                // Apply status
+                isConfigured = data.status.trakt_authenticated && data.status.plex_configured;
+                const badge = document.getElementById('status-badge');
+
+                if (data.status.sync_running) {
+                    badge.textContent = 'Syncing...';
+                    badge.className = 'status-badge running';
+                    document.getElementById('sync-btn').disabled = true;
+                    document.getElementById('sync-btn').textContent = 'Syncing...';
+                    document.getElementById('dry-run-btn').classList.add('hidden');
+                    document.getElementById('cancel-btn').classList.remove('hidden');
+                    document.getElementById('verbose-logging').disabled = true;
+                    document.getElementById('progress-container').classList.remove('hidden');
+                    if (!syncPolling) {
+                        syncPolling = true;
+                        pollSyncStatus();
+                    }
+                } else if (isConfigured) {
+                    badge.textContent = 'Ready';
+                    badge.className = 'status-badge ok';
+                } else {
+                    badge.textContent = 'Setup';
+                    badge.className = 'status-badge error';
+                }
+
+                // Show wizard or dashboard
+                if (isConfigured) {
+                    document.getElementById('wizard').classList.add('hidden');
+                    document.getElementById('dashboard').classList.remove('hidden');
+                    document.getElementById('main-nav').classList.remove('hidden');
+                    document.getElementById('settings-btn').classList.remove('hidden');
+
+                    // Apply config
+                    const sync = data.config.sync;
+                    document.getElementById('watched-plex-to-trakt').checked = sync.watched_plex_to_trakt;
+                    document.getElementById('watched-trakt-to-plex').checked = sync.watched_trakt_to_plex;
+                    document.getElementById('ratings-plex-to-trakt').checked = sync.ratings_plex_to_trakt;
+                    document.getElementById('ratings-trakt-to-plex').checked = sync.ratings_trakt_to_plex;
+                    document.getElementById('collection-plex-to-trakt').checked = sync.collection_plex_to_trakt;
+                    document.getElementById('watchlist-plex-to-trakt').checked = sync.watchlist_plex_to_trakt;
+                    document.getElementById('watchlist-trakt-to-plex').checked = sync.watchlist_trakt_to_plex;
+
+                    // Apply scheduler
+                    const schedEnabledEl = document.getElementById('scheduler-enabled');
+                    const schedIntervalEl = document.getElementById('scheduler-interval');
+                    if (schedEnabledEl) schedEnabledEl.checked = data.config.scheduler.enabled;
+                    if (schedIntervalEl) schedIntervalEl.value = data.config.scheduler.interval_hours;
+
+                    // Apply Trakt account
+                    if (data.trakt_account && data.trakt_account.status === 'ok') {
+                        document.getElementById('trakt-status').textContent = data.trakt_account.is_vip ? 'VIP' : 'Free';
+                        document.getElementById('trakt-status').className = 'value success';
+                    }
+
+                    // Render servers with libraries (from init data)
+                    if (data.servers && data.servers.length > 0) {
+                        renderServersFromInit(data.servers, data.config.sync);
+                        renderPlexServersStats(data.servers);
+                    }
+
+                    // Apply last sync info
+                    if (data.status.last_run) {
+                        document.getElementById('last-run').textContent = new Date(data.status.last_run).toLocaleString();
+                    }
+                    if (data.status.last_result) {
+                        document.getElementById('added-trakt').textContent = data.status.last_result.added_to_trakt || 0;
+                        document.getElementById('added-plex').textContent = data.status.last_result.added_to_plex || 0;
+                        document.getElementById('ratings-synced').textContent = data.status.last_result.ratings_synced || 0;
+                    }
+                } else {
+                    wizardInProgress = true;
+                    document.getElementById('wizard').classList.remove('hidden');
+                    document.getElementById('dashboard').classList.add('hidden');
+                }
+            } catch (e) {
+                console.error('Init failed:', e);
+                // Fall back to old method
+                loadStatus();
+                loadConfig();
+            }
+        })();
         setInterval(loadStatus, 5000);
     </script>
 </body>

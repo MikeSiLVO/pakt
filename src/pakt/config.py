@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import BaseModel, Field
+
+logger = logging.getLogger(__name__)
 
 
 def get_config_dir() -> Path:
@@ -33,12 +35,9 @@ def get_cache_dir() -> Path:
     return cache_dir
 
 
-class TraktConfig(BaseSettings):
+class TraktConfig(BaseModel):
     """Trakt API configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="TRAKT_")
-
-    # Default app credentials - users get their own rate limits after auth
     client_id: str = "bc25ba5024e871104e3a090b98e44895670d66d89d5296fa6ed027d6e2a44f9d"
     client_secret: str = "0a3cb10a368e848ef67ebcbdb0f64b437ee5abf17e07e4f216c9aa7346f587f5"
     access_token: str = ""
@@ -46,155 +45,178 @@ class TraktConfig(BaseSettings):
     expires_at: int = 0
 
 
-class PlexConfig(BaseSettings):
-    """Plex configuration."""
-
-    model_config = SettingsConfigDict(env_prefix="PLEX_")
-
-    url: str = ""
-    token: str = ""
-    server_name: str = ""
-
-
-class SyncConfig(BaseSettings):
+class SyncConfig(BaseModel):
     """Sync behavior configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="PAKT_SYNC_")
-
-    # Sync directions - watched
     watched_plex_to_trakt: bool = True
     watched_trakt_to_plex: bool = True
-
-    # Sync directions - ratings
     ratings_plex_to_trakt: bool = True
     ratings_trakt_to_plex: bool = True
-
-    # Sync directions - collection (Plex library -> Trakt collection)
     collection_plex_to_trakt: bool = False
-
-    # Sync directions - watchlist
     watchlist_plex_to_trakt: bool = False
     watchlist_trakt_to_plex: bool = False
-
-    # Rating priority when both have ratings
     rating_priority: Literal["plex", "trakt", "newest"] = "newest"
 
-    # Libraries to sync (empty = all)
-    movie_libraries: list[str] = Field(default_factory=list)
-    show_libraries: list[str] = Field(default_factory=list)
 
-    # Libraries to exclude
-    excluded_libraries: list[str] = Field(default_factory=list)
-
-    @field_validator("movie_libraries", "show_libraries", "excluded_libraries", mode="before")
-    @classmethod
-    def parse_library_list(cls, v: str | list[str]) -> list[str]:
-        """Parse library list from env var (JSON array or comma-separated)."""
-        if isinstance(v, list):
-            return v
-        if not v or (isinstance(v, str) and v.strip() == ""):
-            return []
-        # Try JSON first (new format), fall back to comma-separated (legacy)
-        v_str = v.strip()
-        if v_str.startswith("["):
-            try:
-                parsed = json.loads(v_str)
-                return parsed if isinstance(parsed, list) else []
-            except json.JSONDecodeError:
-                pass
-        return [lib.strip() for lib in v.split(",") if lib.strip()]
-
-
-class SchedulerConfig(BaseSettings):
+class SchedulerConfig(BaseModel):
     """Scheduler configuration."""
 
-    model_config = SettingsConfigDict(env_prefix="PAKT_SCHEDULER_")
-
     enabled: bool = False
-    interval_hours: int = 0  # 0 = disabled
+    interval_hours: int = 0
     run_on_startup: bool = False
 
 
-class Config(BaseSettings):
-    """Main configuration."""
+class ServerSyncOverrides(BaseModel):
+    """Per-server sync option overrides. None = use global setting."""
 
-    model_config = SettingsConfigDict(
-        env_file=".env",
-        env_file_encoding="utf-8",
-        extra="ignore",
-    )
+    watched_plex_to_trakt: bool | None = None
+    watched_trakt_to_plex: bool | None = None
+    ratings_plex_to_trakt: bool | None = None
+    ratings_trakt_to_plex: bool | None = None
+    collection_plex_to_trakt: bool | None = None
+    watchlist_plex_to_trakt: bool | None = None
+    watchlist_trakt_to_plex: bool | None = None
+
+
+class ServerConfig(BaseModel):
+    """Configuration for a single Plex server."""
+
+    name: str
+    url: str = ""
+    token: str = ""
+    server_name: str = ""
+    enabled: bool = True
+    movie_libraries: list[str] = Field(default_factory=list)
+    show_libraries: list[str] = Field(default_factory=list)
+    excluded_libraries: list[str] = Field(default_factory=list)
+    sync: ServerSyncOverrides | None = None
+
+    def get_sync_option(self, option: str, global_config: SyncConfig) -> bool:
+        """Get effective sync option (server override or global fallback)."""
+        if self.sync:
+            override = getattr(self.sync, option, None)
+            if override is not None:
+                return override
+        return getattr(global_config, option)
+
+
+class Config(BaseModel):
+    """Unified configuration stored in config.json."""
 
     trakt: TraktConfig = Field(default_factory=TraktConfig)
-    plex: PlexConfig = Field(default_factory=PlexConfig)
     sync: SyncConfig = Field(default_factory=SyncConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    plex_token: str = ""
+    servers: list[ServerConfig] = Field(default_factory=list)
+
+    def get_server(self, name: str) -> ServerConfig | None:
+        """Get server by name."""
+        for server in self.servers:
+            if server.name == name:
+                return server
+        return None
+
+    def get_enabled_servers(self) -> list[ServerConfig]:
+        """Get all enabled servers."""
+        return [s for s in self.servers if s.enabled]
 
     @classmethod
     def load(cls, config_dir: Path | None = None) -> Config:
-        """Load configuration from file and environment."""
+        """Load configuration from config.json, with migration from legacy formats."""
         if config_dir is None:
             config_dir = get_config_dir()
 
-        # Fields that need empty string -> [] conversion for pydantic-settings
-        list_fields = {
-            "PAKT_SYNC_MOVIE_LIBRARIES",
-            "PAKT_SYNC_SHOW_LIBRARIES",
-            "PAKT_SYNC_EXCLUDED_LIBRARIES",
-        }
+        config_file = config_dir / "config.json"
 
-        # Fix any existing empty list env vars (pydantic-settings needs valid JSON)
-        for key in list_fields:
-            if key in os.environ and os.environ[key].strip() == "":
-                os.environ[key] = "[]"
+        if config_file.exists():
+            try:
+                data = json.loads(config_file.read_text(encoding="utf-8"))
+                return cls(**data)
+            except (json.JSONDecodeError, Exception) as e:
+                logger.warning(f"Failed to load config.json: {e}")
+                return cls()
 
-        env_file = config_dir / ".env"
-        if env_file.exists():
-            # Load env vars into os.environ so nested configs pick them up
-            for line in env_file.read_text().splitlines():
-                line = line.strip()
-                if line and "=" in line and not line.startswith("#"):
-                    key, value = line.split("=", 1)
-                    # Convert empty strings to JSON empty array for list fields
-                    if key in list_fields and value.strip() == "":
-                        value = "[]"
-                    os.environ[key] = value
+        # Migration: check for legacy .env and servers.json
+        config = _migrate_legacy_config(config_dir)
+        if config:
+            config.save(config_dir)
+            return config
 
         return cls()
 
     def save(self, config_dir: Path | None = None) -> None:
-        """Save configuration to file."""
+        """Save configuration to config.json."""
         if config_dir is None:
             config_dir = get_config_dir()
 
-        env_file = config_dir / ".env"
-        lines = [
-            # Trakt
-            f"TRAKT_CLIENT_ID={self.trakt.client_id}",
-            f"TRAKT_CLIENT_SECRET={self.trakt.client_secret}",
-            f"TRAKT_ACCESS_TOKEN={self.trakt.access_token}",
-            f"TRAKT_REFRESH_TOKEN={self.trakt.refresh_token}",
-            f"TRAKT_EXPIRES_AT={self.trakt.expires_at}",
-            # Plex
-            f"PLEX_URL={self.plex.url}",
-            f"PLEX_TOKEN={self.plex.token}",
-            f"PLEX_SERVER_NAME={self.plex.server_name}",
-            # Sync - watched
-            f"PAKT_SYNC_WATCHED_PLEX_TO_TRAKT={str(self.sync.watched_plex_to_trakt).lower()}",
-            f"PAKT_SYNC_WATCHED_TRAKT_TO_PLEX={str(self.sync.watched_trakt_to_plex).lower()}",
-            # Sync - ratings
-            f"PAKT_SYNC_RATINGS_PLEX_TO_TRAKT={str(self.sync.ratings_plex_to_trakt).lower()}",
-            f"PAKT_SYNC_RATINGS_TRAKT_TO_PLEX={str(self.sync.ratings_trakt_to_plex).lower()}",
-            # Sync - collection
-            f"PAKT_SYNC_COLLECTION_PLEX_TO_TRAKT={str(self.sync.collection_plex_to_trakt).lower()}",
-            # Sync - watchlist
-            f"PAKT_SYNC_WATCHLIST_PLEX_TO_TRAKT={str(self.sync.watchlist_plex_to_trakt).lower()}",
-            f"PAKT_SYNC_WATCHLIST_TRAKT_TO_PLEX={str(self.sync.watchlist_trakt_to_plex).lower()}",
-            # Sync - libraries (JSON format for pydantic-settings)
-            f"PAKT_SYNC_MOVIE_LIBRARIES={json.dumps(self.sync.movie_libraries)}",
-            f"PAKT_SYNC_SHOW_LIBRARIES={json.dumps(self.sync.show_libraries)}",
-            # Scheduler
-            f"PAKT_SCHEDULER_ENABLED={str(self.scheduler.enabled).lower()}",
-            f"PAKT_SCHEDULER_INTERVAL_HOURS={self.scheduler.interval_hours}",
-            f"PAKT_SCHEDULER_RUN_ON_STARTUP={str(self.scheduler.run_on_startup).lower()}",
-        ]
-        env_file.write_text("\n".join(lines))
+        config_file = config_dir / "config.json"
+        config_file.write_text(
+            self.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+
+
+def _migrate_legacy_config(config_dir: Path) -> Config | None:
+    """Migrate from legacy .env to config.json."""
+    env_file = config_dir / ".env"
+
+    if not env_file.exists():
+        return None
+
+    logger.info("Migrating .env to config.json")
+
+    config = Config()
+    env_vars = {}
+    for line in env_file.read_text().splitlines():
+        line = line.strip()
+        if line and "=" in line and not line.startswith("#"):
+            key, value = line.split("=", 1)
+            env_vars[key] = value
+
+    # Trakt config
+    config.trakt.client_id = env_vars.get("TRAKT_CLIENT_ID", config.trakt.client_id)
+    config.trakt.client_secret = env_vars.get("TRAKT_CLIENT_SECRET", config.trakt.client_secret)
+    config.trakt.access_token = env_vars.get("TRAKT_ACCESS_TOKEN", "")
+    config.trakt.refresh_token = env_vars.get("TRAKT_REFRESH_TOKEN", "")
+    config.trakt.expires_at = int(env_vars.get("TRAKT_EXPIRES_AT", "0") or "0")
+
+    # Sync config
+    def parse_bool(val: str) -> bool:
+        return val.lower() in ("true", "1", "yes")
+
+    config.sync.watched_plex_to_trakt = parse_bool(env_vars.get("PAKT_SYNC_WATCHED_PLEX_TO_TRAKT", "true"))
+    config.sync.watched_trakt_to_plex = parse_bool(env_vars.get("PAKT_SYNC_WATCHED_TRAKT_TO_PLEX", "true"))
+    config.sync.ratings_plex_to_trakt = parse_bool(env_vars.get("PAKT_SYNC_RATINGS_PLEX_TO_TRAKT", "true"))
+    config.sync.ratings_trakt_to_plex = parse_bool(env_vars.get("PAKT_SYNC_RATINGS_TRAKT_TO_PLEX", "true"))
+    config.sync.collection_plex_to_trakt = parse_bool(env_vars.get("PAKT_SYNC_COLLECTION_PLEX_TO_TRAKT", "false"))
+    config.sync.watchlist_plex_to_trakt = parse_bool(env_vars.get("PAKT_SYNC_WATCHLIST_PLEX_TO_TRAKT", "false"))
+    config.sync.watchlist_trakt_to_plex = parse_bool(env_vars.get("PAKT_SYNC_WATCHLIST_TRAKT_TO_PLEX", "false"))
+
+    # Scheduler config
+    config.scheduler.enabled = parse_bool(env_vars.get("PAKT_SCHEDULER_ENABLED", "false"))
+    config.scheduler.interval_hours = int(env_vars.get("PAKT_SCHEDULER_INTERVAL_HOURS", "0") or "0")
+    config.scheduler.run_on_startup = parse_bool(env_vars.get("PAKT_SCHEDULER_RUN_ON_STARTUP", "false"))
+
+    # Legacy Plex config - create a server if URL and token exist
+    legacy_plex_url = env_vars.get("PLEX_URL", "")
+    legacy_plex_token = env_vars.get("PLEX_TOKEN", "")
+    legacy_server_name = env_vars.get("PLEX_SERVER_NAME", "")
+
+    if legacy_plex_url and legacy_plex_token:
+        config.plex_token = legacy_plex_token
+        config.servers.append(
+            ServerConfig(
+                name="default",
+                url=legacy_plex_url,
+                token=legacy_plex_token,
+                server_name=legacy_server_name,
+                enabled=True,
+            )
+        )
+
+    # Rename .env to .env.bak
+    env_file.rename(config_dir / ".env.bak")
+    logger.info("Renamed .env to .env.bak")
+
+    logger.info("Migration complete: created config.json")
+    return config
