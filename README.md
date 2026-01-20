@@ -27,6 +27,8 @@ pakt sync     # Run sync
 
 ## Commands
 
+For detailed options and examples, see the [CLI Reference](https://github.com/MikeSiLVO/Pakt/blob/main/docs/cli.md).
+
 ### Setup & Authentication
 
 ```bash
@@ -72,7 +74,7 @@ pakt libraries -s "TV Shows" # Select specific show library
 ### Web Interface
 
 ```bash
-pakt serve                   # Start web UI at localhost:8080
+pakt serve                   # Start web UI at localhost:7258
 pakt serve --host 0.0.0.0    # Listen on all interfaces
 pakt serve --port 9000       # Use custom port
 pakt serve --tray            # With system tray icon (Windows)
@@ -92,7 +94,7 @@ Start the web UI:
 pakt serve
 ```
 
-Open http://localhost:8080 in your browser.
+Open http://localhost:7258 in your browser.
 
 ### Views
 
@@ -137,13 +139,15 @@ For startup configuration and scheduled tasks on Windows, macOS, and Linux, see 
 docker-compose up -d
 ```
 
-Web UI at http://localhost:8080. Config persists in the `pakt-config` volume.
+Web UI at http://localhost:7258. Config persists in the `pakt-config` volume.
 
 **First-time setup**: Run interactively to authenticate:
 ```bash
 docker-compose run --rm pakt pakt setup
 docker-compose run --rm pakt pakt login
 ```
+
+See the [Docker Guide](https://github.com/MikeSiLVO/Pakt/blob/main/docs/docker.md) for networking, volumes, and advanced configuration.
 
 ## What Gets Synced
 
@@ -176,11 +180,30 @@ Config location:
 - Windows: `%APPDATA%\pakt`
 - Linux/macOS: `~/.config/pakt`
 
-All configuration is stored in `config.json`.
+All configuration is stored in `config.json`. See the [Configuration Reference](https://github.com/MikeSiLVO/Pakt/blob/main/docs/configuration.md) for all options.
+
+### Web Server
+
+Default port is 7258 (PAKT on phone keypad). To change, edit `config.json`:
+
+```json
+{
+  "web": {
+    "host": "127.0.0.1",
+    "port": 9000
+  }
+}
+```
+
+Or use CLI flags: `pakt serve --host 0.0.0.0 --port 9000`
 
 ## Trakt Account Limits
 
 Free Trakt accounts have a 100-item limit on collections and watchlists. Pakt will warn you if you hit these limits. Upgrade to [Trakt VIP](https://trakt.tv/vip) for unlimited.
+
+## Troubleshooting
+
+Having issues? See the [Troubleshooting Guide](https://github.com/MikeSiLVO/Pakt/blob/main/docs/troubleshooting.md) for common problems and solutions.
 
 ## Changelog
 

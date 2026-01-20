@@ -66,6 +66,13 @@ class SchedulerConfig(BaseModel):
     run_on_startup: bool = False
 
 
+class WebConfig(BaseModel):
+    """Web server configuration."""
+
+    host: str = "127.0.0.1"
+    port: int = 7258
+
+
 class ServerSyncOverrides(BaseModel):
     """Per-server sync option overrides. None = use global setting."""
 
@@ -103,11 +110,12 @@ class ServerConfig(BaseModel):
 class Config(BaseModel):
     """Unified configuration stored in config.json."""
 
-    trakt: TraktConfig = Field(default_factory=TraktConfig)
+    web: WebConfig = Field(default_factory=WebConfig)
     sync: SyncConfig = Field(default_factory=SyncConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     plex_token: str = ""
     servers: list[ServerConfig] = Field(default_factory=list)
+    trakt: TraktConfig = Field(default_factory=TraktConfig)
 
     def get_server(self, name: str) -> ServerConfig | None:
         """Get server by name."""

@@ -1,6 +1,6 @@
 # Automation Guide
 
-Run Pakt automatically on startup or on a schedule.
+Run Pakt automatically on startup or on a schedule. See also the main [README](https://github.com/MikeSiLVO/Pakt#readme) for quick start and overview.
 
 ## Windows
 
@@ -60,7 +60,7 @@ For scheduled syncs without the web server running:
 1. Create a shell script `~/bin/pakt-serve.sh`:
    ```bash
    #!/bin/bash
-   /usr/local/bin/pakt serve --port 8080
+   /usr/local/bin/pakt serve --port 7258
    ```
 2. Make executable: `chmod +x ~/bin/pakt-serve.sh`
 3. System Settings → General → Login Items → Add the script
@@ -115,7 +115,7 @@ Description=Pakt Web Server
 After=network.target
 
 [Service]
-ExecStart=/usr/local/bin/pakt serve --host 127.0.0.1 --port 8080
+ExecStart=/usr/local/bin/pakt serve --host 127.0.0.1 --port 7258
 Restart=on-failure
 RestartSec=5
 
@@ -182,7 +182,7 @@ Adjust the path to `pakt` based on your installation (`which pakt`).
 Alternatively, use Pakt's built-in scheduler via the web UI:
 
 1. Run `pakt serve` (or as a background service)
-2. Open http://localhost:8080
+2. Open http://localhost:7258
 3. Go to Settings → Scheduled Sync
 4. Set interval in hours and enable
 

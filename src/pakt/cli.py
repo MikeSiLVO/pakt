@@ -410,19 +410,25 @@ def status():
 
 
 @main.command()
-@click.option("--host", default="127.0.0.1", help="Host to bind to")
-@click.option("--port", default=8080, help="Port to bind to")
+@click.option("--host", default=None, help="Host to bind to (default: from config or 127.0.0.1)")
+@click.option("--port", default=None, type=int, help="Port to bind to (default: from config or 7258)")
 @click.option("--tray/--no-tray", default=None, help="Enable/disable system tray icon")
-def serve(host: str, port: int, tray: bool | None):
+def serve(host: str | None, port: int | None, tray: bool | None):
     """Start the web interface."""
     import os
     import signal
 
     import uvicorn
 
-    from pakt.config import get_config_dir
+    from pakt.config import Config, get_config_dir
     from pakt.web import create_app
     from pakt.web.app import sync_state
+
+    # Load config for defaults, save to ensure web section exists in config.json
+    config = Config.load()
+    host = host or config.web.host
+    port = port or config.web.port
+    config.save()
 
     # Only show tray when explicitly requested with --tray
     show_tray = tray is True
