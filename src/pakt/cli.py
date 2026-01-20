@@ -420,6 +420,7 @@ def serve(host: str, port: int, tray: bool | None):
 
     import uvicorn
 
+    from pakt.config import get_config_dir
     from pakt.web import create_app
     from pakt.web.app import sync_state
 
@@ -428,6 +429,51 @@ def serve(host: str, port: int, tray: bool | None):
 
     # Suppress console output only when --tray explicitly passed (for pythonw compatibility)
     silent_mode = tray is True
+
+    # Check port availability early (before log rotation)
+    import socket
+    port_in_use = False
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        sock.bind((host, port))
+        sock.close()
+    except OSError:
+        port_in_use = True
+
+    # Debug logging for pythonw troubleshooting
+    debug_log = None
+    def log(msg: str) -> None:
+        pass
+
+    if silent_mode:
+        try:
+            from datetime import datetime
+            log_path = get_config_dir() / "debug.log"
+            old_log_path = get_config_dir() / "debug.log.1"
+
+            if port_in_use:
+                # Separate file for conflicts - avoids race with running instance
+                conflict_log = get_config_dir() / "debug.conflict.log"
+                debug_log = open(conflict_log, "w")
+            else:
+                # Rotate: current -> .1 (discard older)
+                if log_path.exists():
+                    if old_log_path.exists():
+                        old_log_path.unlink()
+                    log_path.rename(old_log_path)
+                debug_log = open(log_path, "w")
+
+            def log(msg: str) -> None:
+                if debug_log:
+                    debug_log.write(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
+                    debug_log.flush()
+
+            if port_in_use:
+                log(f"Instance start blocked - port {port} in use")
+            else:
+                log(f"serve() started (host={host}, port={port})")
+        except Exception:
+            pass
 
     # Redirect stdout/stderr to devnull in silent mode (for pythonw)
     if silent_mode:
@@ -441,32 +487,75 @@ def serve(host: str, port: int, tray: bool | None):
     tray_instance = None
     if show_tray:
         try:
+            if not port_in_use:
+                log("Importing tray module")
             from pakt.tray import TRAY_AVAILABLE, PaktTray
 
             if TRAY_AVAILABLE:
+                if not port_in_use:
+                    log("Creating PaktTray instance")
                 web_url = f"http://{host}:{port}"
+
+                def on_exit():
+                    log("Exit requested from tray")
+                    os._exit(0)
+
                 tray_instance = PaktTray(
                     web_url=web_url,
-                    shutdown_callback=lambda: sys.exit(0),
+                    shutdown_callback=on_exit,
                 )
+                if not port_in_use:
+                    log("Starting tray")
                 tray_instance.start()
+                import time
+                time.sleep(0.5)
+                if not port_in_use:
+                    log("Tray started")
             elif not silent_mode:
                 console.print("[yellow]System tray requested but dependencies not installed.[/]")
                 console.print("[yellow]Install with: pip install pystray Pillow[/]")
-        except ImportError:
+        except ImportError as e:
+            log(f"ImportError: {e}")
             if not silent_mode:
                 console.print("[yellow]System tray requested but dependencies not installed.[/]")
                 console.print("[yellow]Install with: pip install pystray Pillow[/]")
+        except Exception as e:
+            log(f"Exception: {e}")
+
+    # Handle port conflict after tray is ready (for notification)
+    if port_in_use:
+        log("Attempting to show notification")
+        if tray_instance and tray_instance._icon:
+            try:
+                tray_instance._icon.notify(
+                    f"Port {port} already in use.\nAnother instance may be running.",
+                    "Pakt"
+                )
+                log("Notification sent, waiting 3s")
+            except Exception as e:
+                log(f"Notification failed: {e}")
+            import time
+            time.sleep(3)
+        else:
+            log("No tray icon available for notification")
+        if not silent_mode:
+            console.print(f"[red]Error:[/] Port {port} already in use. Another instance may be running.")
+        log("Exiting due to port conflict")
+        if debug_log:
+            debug_log.close()
+        return
 
     if not silent_mode:
         console.print("[bold]Starting Pakt web interface...[/]")
         console.print(f"Open [cyan]http://{host}:{port}[/] in your browser")
         console.print("[dim]Press Ctrl+C to stop[/]\n")
 
+    log("Creating app")
     app = create_app()
 
     # Handle Ctrl+C gracefully - cancel sync if running
     def handle_sigint(signum, frame):
+        log("SIGINT received")
         if sync_state["running"]:
             if not silent_mode:
                 console.print("\n[yellow]Cancelling sync...[/]")
@@ -476,12 +565,40 @@ def serve(host: str, port: int, tray: bool | None):
                 console.print("\n[dim]Shutting down...[/]")
             raise KeyboardInterrupt
 
-    signal.signal(signal.SIGINT, handle_sigint)
+    try:
+        signal.signal(signal.SIGINT, handle_sigint)
+    except Exception:
+        pass  # Signal handling may not work with pythonw
 
     try:
-        log_level = "critical" if silent_mode else "warning"
-        uvicorn.run(app, host=host, port=port, log_level=log_level)
+        log(f"Starting uvicorn on {host}:{port}")
+        uvi_log_level = "critical" if silent_mode else "warning"
+
+        # Use uvicorn.Config + Server for better control in pythonw environment
+        uvi_config = uvicorn.Config(app, host=host, port=port, log_level=uvi_log_level)
+        server = uvicorn.Server(uvi_config)
+
+        # Notify on successful start
+        if tray_instance and tray_instance._icon:
+            try:
+                log("Sending startup notification")
+                tray_instance._icon.notify(f"Running on http://{host}:{port}", "Pakt")
+            except Exception as e:
+                log(f"Notification failed: {e}")
+
+        log("Running uvicorn server")
+        import asyncio
+        asyncio.run(server.serve())
+
+        log("uvicorn.serve() returned normally")
+    except Exception as e:
+        import traceback
+        log(f"uvicorn error: {e}\n{traceback.format_exc()}")
+        raise
     finally:
+        log("Shutting down")
+        if debug_log:
+            debug_log.close()
         if tray_instance:
             tray_instance.stop()
 

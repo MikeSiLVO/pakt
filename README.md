@@ -129,6 +129,8 @@ Run without a console window:
 pythonw -m pakt serve --tray
 ```
 
+For startup configuration and scheduled tasks on Windows, macOS, and Linux, see the [Automation Guide](https://github.com/MikeSiLVO/Pakt/blob/main/docs/automation.md).
+
 ## Docker
 
 ```bash
