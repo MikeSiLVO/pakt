@@ -8,6 +8,11 @@ Sync watched status, ratings, and collections between Plex and Trakt.
 pip install pakt
 ```
 
+Or with pipx (isolated environment):
+```bash
+pipx install pakt
+```
+
 With system tray support (Windows):
 ```bash
 pip install pakt[tray]
@@ -122,6 +127,20 @@ Each Plex server has independent configuration:
 Run without a console window:
 ```bash
 pythonw -m pakt serve --tray
+```
+
+## Docker
+
+```bash
+docker-compose up -d
+```
+
+Web UI at http://localhost:8080. Config persists in the `pakt-config` volume.
+
+**First-time setup**: Run interactively to authenticate:
+```bash
+docker-compose run --rm pakt pakt setup
+docker-compose run --rm pakt pakt login
 ```
 
 ## What Gets Synced

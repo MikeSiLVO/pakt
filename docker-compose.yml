@@ -1,0 +1,11 @@
+services:
+  pakt:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - pakt-config:/root/.config/pakt
+    restart: unless-stopped
+
+volumes:
+  pakt-config:

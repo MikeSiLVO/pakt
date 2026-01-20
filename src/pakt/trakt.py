@@ -44,6 +44,13 @@ class TraktAccountLimitError(Exception):
         super().__init__(msg)
 
 
+class TraktAuthError(Exception):
+    """Raised when authentication fails (invalid/expired tokens)."""
+
+    def __init__(self, message: str = "Authentication failed. Run 'pakt login' to re-authenticate."):
+        super().__init__(message)
+
+
 @dataclass
 class AccountLimits:
     """User account limits from Trakt."""
@@ -128,8 +135,14 @@ class TraktClient:
                 self._on_token_refresh(token)
 
             console.print("[green]Token refreshed successfully[/]")
+        except TraktAuthError:
+            # Invalid refresh token - user must re-authenticate
+            console.print("[red]Refresh token expired or revoked. Run 'pakt login' to re-authenticate.[/]")
+            raise
         except Exception as e:
-            console.print(f"[yellow]Token refresh failed: {e}[/]")
+            # Network error - continue with old token, might still work
+            console.print(f"[yellow]Token refresh failed after retries: {e}[/]")
+            console.print("[yellow]Continuing with existing token...[/]")
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -165,6 +178,10 @@ class TraktClient:
                     )
                     await asyncio.sleep(retry_after + 1)
                     continue
+
+                # Handle authentication failure
+                if response.status_code == 401:
+                    raise TraktAuthError()
 
                 # Handle account limit exceeded (non-VIP limit)
                 if response.status_code == 420:
@@ -526,20 +543,45 @@ class TraktClient:
         )
 
     async def refresh_access_token(self) -> dict[str, Any]:
-        """Refresh the access token."""
-        async with httpx.AsyncClient() as client:
-            response = await client.post(
-                f"{TRAKT_API_URL}/oauth/token",
-                json={
-                    "refresh_token": self.config.refresh_token,
-                    "client_id": self.config.client_id,
-                    "client_secret": self.config.client_secret,
-                    "grant_type": "refresh_token",
-                },
-                headers={"Content-Type": "application/json"},
-            )
-            response.raise_for_status()
-            return response.json()
+        """Refresh the access token with retry logic for network errors."""
+        last_error: Exception | None = None
+        retries = 3
+        backoff = [1, 2]  # Wait times between retries
+
+        for attempt in range(retries):
+            try:
+                async with httpx.AsyncClient(timeout=30.0) as client:
+                    response = await client.post(
+                        f"{TRAKT_API_URL}/oauth/token",
+                        json={
+                            "refresh_token": self.config.refresh_token,
+                            "client_id": self.config.client_id,
+                            "client_secret": self.config.client_secret,
+                            "grant_type": "refresh_token",
+                        },
+                        headers={"Content-Type": "application/json"},
+                    )
+
+                    # 401 = invalid/expired refresh token, user must re-auth
+                    if response.status_code == 401:
+                        raise TraktAuthError("Refresh token expired or revoked. Run 'pakt login' to re-authenticate.")
+
+                    response.raise_for_status()
+                    return response.json()
+
+            except TraktAuthError:
+                # Don't retry auth errors - they won't succeed
+                raise
+            except (httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.TimeoutException) as e:
+                last_error = e
+                if attempt < retries - 1:
+                    wait = backoff[attempt]
+                    console.print(f"[yellow]Token refresh failed (attempt {attempt + 1}/{retries}), "
+                                  f"retrying in {wait}s...[/]")
+                    await asyncio.sleep(wait)
+
+        # All retries exhausted
+        raise last_error or Exception("Token refresh failed after retries")
 
     async def revoke_token(self) -> bool:
         """Revoke the current access token (logout).
