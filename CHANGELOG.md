@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.2.2] - 2025-01-21
+
+### Added
+- **Docker support** - Dockerfile and docker-compose.yml for containerized deployment
+- **Configurable port** - Web UI port now configurable via config file or `--port` flag (default: 7258)
+- **Documentation** - Comprehensive docs for CLI, configuration, Docker, troubleshooting, and automation
+
+### Fixed
+- **Pythonw tray mode** - Fixed `serve --tray` under pythonw on Windows (silent mode, port conflict handling)
+
+### Changed
+- **Token refresh** - Improved Trakt OAuth token refresh with better error handling and retry logic
+
 ## [0.2.1] - 2025-01-20
 
 ### Fixed
