@@ -27,7 +27,7 @@ pakt sync     # Run sync
 
 ## Commands
 
-For detailed options and examples, see the [CLI Reference](https://github.com/MikeSiLVO/Pakt/blob/main/docs/cli.md).
+See the [CLI Reference](https://github.com/MikeSiLVO/Pakt/blob/main/docs/cli.md) for detailed options and examples.
 
 ### Setup & Authentication
 
@@ -81,12 +81,6 @@ pakt serve --tray            # With system tray icon (Windows)
 pakt serve --no-tray         # Without system tray (default)
 ```
 
-### Maintenance
-
-```bash
-pakt clear-cache             # Clear Trakt API cache
-```
-
 ## Web Interface
 
 Start the web UI:
@@ -131,7 +125,7 @@ Run without a console window:
 pythonw -m pakt serve --tray
 ```
 
-For startup configuration and scheduled tasks on Windows, macOS, and Linux, see the [Automation Guide](https://github.com/MikeSiLVO/Pakt/blob/main/docs/automation.md).
+See the [Automation Guide](https://github.com/MikeSiLVO/Pakt/blob/main/docs/automation.md) for startup configuration and scheduled tasks on Windows, macOS, and Linux.
 
 ## Docker
 

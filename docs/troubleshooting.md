@@ -215,11 +215,7 @@ Options:
 **Solution:**
 
 1. Fix metadata in Plex (use "Fix Match" or "Refresh Metadata")
-2. Clear Pakt's cache:
-   ```bash
-   pakt clear-cache
-   ```
-3. Re-run sync
+2. Re-run sync
 
 ---
 
@@ -244,7 +240,7 @@ Check scheduler config:
 }
 ```
 
-The scheduler only runs while `pakt serve` is running. For persistent scheduling, run as a background service. See the [Automation Guide](https://github.com/MikeSiLVO/Pakt/blob/main/docs/automation.md).
+The scheduler only runs while `pakt serve` is running. For persistent scheduling, see the [Automation Guide](https://github.com/MikeSiLVO/Pakt/blob/main/docs/automation.md) to run as a background service.
 
 ---
 

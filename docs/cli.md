@@ -236,20 +236,6 @@ pakt serve --no-tray          # Explicitly disable tray
 
 ---
 
-## Maintenance
-
-### `pakt clear-cache`
-
-Clear the Trakt API cache.
-
-```bash
-pakt clear-cache
-```
-
-Useful if you're seeing stale data or after making changes directly on Trakt.
-
----
-
 ## Examples
 
 ### First-time setup

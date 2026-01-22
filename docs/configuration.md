@@ -27,7 +27,7 @@ Complete reference for Pakt's `config.json` settings. See also the main [README]
   },
   "scheduler": {
     "enabled": false,
-    "interval_hours": 24,
+    "interval_hours": 0,
     "run_on_startup": false
   },
   "plex_token": "your-plex-account-token",

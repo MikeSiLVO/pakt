@@ -41,18 +41,14 @@ Follow the prompts to:
 ## docker-compose.yml
 
 ```yaml
-version: '3.8'
-
 services:
   pakt:
     build: .
-    container_name: pakt
     ports:
       - "7258:7258"
     volumes:
       - pakt-config:/root/.config/pakt
     restart: unless-stopped
-    command: pakt serve --host 0.0.0.0
 
 volumes:
   pakt-config:
@@ -136,14 +132,6 @@ docker-compose run --rm pakt pakt status
 docker-compose run --rm pakt pakt servers list
 docker-compose run --rm pakt pakt servers discover
 docker-compose run --rm pakt pakt servers test MyServer
-```
-
----
-
-### Clear Cache
-
-```bash
-docker-compose run --rm pakt pakt clear-cache
 ```
 
 ---
@@ -246,16 +234,17 @@ docker-compose up -d
 The included Dockerfile:
 
 ```dockerfile
-FROM python:3.11-slim
+FROM python:3.12-slim
 
-WORKDIR /app
-COPY . .
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir pakt
+
+VOLUME /root/.config/pakt
+EXPOSE 7258
 
 CMD ["pakt", "serve", "--host", "0.0.0.0"]
 ```
 
-Builds a minimal image with Pakt installed.
+Installs Pakt from PyPI into a minimal image.
 
 ---
 

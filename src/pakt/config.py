@@ -95,7 +95,6 @@ class ServerConfig(BaseModel):
     enabled: bool = True
     movie_libraries: list[str] = Field(default_factory=list)
     show_libraries: list[str] = Field(default_factory=list)
-    excluded_libraries: list[str] = Field(default_factory=list)
     sync: ServerSyncOverrides | None = None
 
     def get_sync_option(self, option: str, global_config: SyncConfig) -> bool:
