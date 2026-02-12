@@ -297,8 +297,8 @@ class SyncEngine:
         else:
             display_msg = msg
 
-        # Strip rich markup for clean message
-        clean_msg = re.sub(r'\[/?[^\]]+\]', '', display_msg)
+        # Strip rich markup tags but preserve non-markup brackets like [2019-06-17]
+        clean_msg = re.sub(r'\[/?[a-zA-Z#][^\]]*\]', '', display_msg)
 
         # Always log to file
         get_file_logger().info(clean_msg)
@@ -749,9 +749,10 @@ class SyncEngine:
 
         return True
 
-    async def _sync_collection(self, result: SyncResult, dry_run: bool) -> bool:
+    async def _sync_collection(self, result: SyncResult, dry_run: bool, no_movies: bool = False, no_shows: bool = False) -> bool:
         """Sync Plex library to Trakt collection. Returns False if cancelled."""
         if not self._get_sync_option("collection_plex_to_trakt"):
+            self._log("\n[dim]Phase 3: Skipped (collection sync disabled)[/]")
             return True
 
         phase_start = time.time()
@@ -783,29 +784,33 @@ class SyncEngine:
                 trakt_collection_shows = await self.trakt.get_collection_shows()
                 progress.update(task, description=f"Got {len(trakt_collection_shows)} collected shows")
 
-            task = progress.add_task("Fetching Plex movies...", total=None)
-            self._progress(3, 4, 15, "Plex movies")
-            # Run in thread to not block event loop (allows web UI updates)
-            plex_movies = await asyncio.to_thread(
-                self.plex.get_all_movies, self._get_movie_libraries()
-            )
-            progress.update(task, description=f"Got {len(plex_movies)} movies")
+            if not no_movies:
+                task = progress.add_task("Fetching Plex movies...", total=None)
+                self._progress(3, 4, 15, "Plex movies")
+                plex_movies = await asyncio.to_thread(
+                    self.plex.get_all_movies, self._get_movie_libraries()
+                )
+                progress.update(task, description=f"Got {len(plex_movies)} movies")
+            else:
+                plex_movies = []
 
-            task = progress.add_task("Fetching Plex shows...", total=None)
-            self._progress(3, 4, 18, "Plex shows")
-            # Run in thread to not block event loop (allows web UI updates)
-            plex_shows = await asyncio.to_thread(
-                self.plex.get_all_shows, self._get_show_libraries()
-            )
-            progress.update(task, description=f"Got {len(plex_shows)} shows")
+            if not no_shows:
+                task = progress.add_task("Fetching Plex shows...", total=None)
+                self._progress(3, 4, 18, "Plex shows")
+                plex_shows = await asyncio.to_thread(
+                    self.plex.get_all_shows, self._get_show_libraries()
+                )
+                progress.update(task, description=f"Got {len(plex_shows)} shows")
 
-            task = progress.add_task("Fetching Plex episodes...", total=None)
-            self._progress(3, 4, 20, "Plex episodes")
-            # Run in thread to not block event loop (allows web UI updates)
-            plex_episodes = await asyncio.to_thread(
-                self.plex.get_all_episodes, self._get_show_libraries()
-            )
-            progress.update(task, description=f"Got {len(plex_episodes)} episodes")
+                task = progress.add_task("Fetching Plex episodes...", total=None)
+                self._progress(3, 4, 20, "Plex episodes")
+                plex_episodes = await asyncio.to_thread(
+                    self.plex.get_all_episodes, self._get_show_libraries()
+                )
+                progress.update(task, description=f"Got {len(plex_episodes)} episodes")
+            else:
+                plex_shows = []
+                plex_episodes = []
 
         current_collection_count = len(trakt_collection_movies) + len(trakt_collection_shows)
         self._log(f"  Trakt collection: {len(trakt_collection_movies)} movies, {len(trakt_collection_shows)} shows")
@@ -1005,20 +1010,25 @@ class SyncEngine:
 
         if self._verbose:
             for m in movies_to_collect:
-                self._log(f"    [dim]→ Collection: {m.get('title')} ({m.get('year')})[/]")
-            # New shows - just show name
-            for s in new_shows:
-                year_str = f" ({s['year']})" if s['year'] else ""
-                self._log(f"    [dim]→ Collection: {s['title']}{year_str}[/]")
-            # Existing shows - show episode details
-            for s in existing_shows_with_new_eps:
+                ca = m.get('collected_at', '')
+                date_str = f" [{ca[:10]}]" if ca else ""
+                self._log(f"    [dim]→ Collection: {m.get('title')} ({m.get('year')}){date_str}[/]")
+            for s in new_shows + existing_shows_with_new_eps:
                 episodes = s["episodes"]
-                if len(episodes) <= 5:
+                # Show earliest episode date as representative
+                dates = [dt for *_, dt in episodes if dt is not None]
+                earliest = min(dates).strftime("%Y-%m-%d") if dates else ""
+                date_str = f" [{earliest}]" if earliest else ""
+                year_str = f" ({s['year']})" if s['year'] else ""
+                if s["new_show"] or len(episodes) > 20:
+                    self._log(f"    [dim]→ Collection: {s['title']}{year_str} ({len(episodes)} eps){date_str}[/]")
+                elif len(episodes) <= 5:
                     ep_list = ", ".join(f"S{se:02d}E{ep:02d}" for se, ep, *_ in episodes)
+                    self._log(f"    [dim]→ Collection: {s['title']} - {ep_list}{date_str}[/]")
                 else:
                     first_5 = ", ".join(f"S{se:02d}E{ep:02d}" for se, ep, *_ in episodes[:5])
                     ep_list = f"{first_5} (+{len(episodes)-5} more)"
-                self._log(f"    [dim]→ Collection: {s['title']} - {ep_list}[/]")
+                    self._log(f"    [dim]→ Collection: {s['title']} - {ep_list}{date_str}[/]")
 
         # Build Trakt show objects with episode data
         shows_to_collect: list[dict] = []
@@ -1103,6 +1113,7 @@ class SyncEngine:
     async def _sync_watchlist(self, result: SyncResult, dry_run: bool) -> bool:
         """Sync watchlists between Plex and Trakt. Returns False if cancelled."""
         if not (self._get_sync_option("watchlist_plex_to_trakt") or self._get_sync_option("watchlist_trakt_to_plex")):
+            self._log("\n[dim]Phase 4: Skipped (watchlist sync disabled)[/]")
             return True
 
         phase_start = time.time()
@@ -1329,7 +1340,14 @@ class SyncEngine:
 
         return True
 
-    async def sync(self, dry_run: bool = False, fix_collection_dates: bool = False) -> SyncResult | None:
+    async def sync(
+        self,
+        dry_run: bool = False,
+        fix_collection_dates: bool = False,
+        collection_only: bool = False,
+        no_movies: bool = False,
+        no_shows: bool = False,
+    ) -> SyncResult | None:
         """Run full sync."""
         self._fix_collection_dates = fix_collection_dates
         start_time = time.time()
@@ -1344,22 +1362,37 @@ class SyncEngine:
         self._log(f"  Mode: {'Dry run' if dry_run else 'Live sync'}")
         if fix_collection_dates:
             self._log("  [yellow]Fix collection dates: re-sending all items with Plex addedAt dates[/]")
+        if collection_only:
+            self._log("  [cyan]Collection only: skipping watched, ratings, watchlist[/]")
+        if no_movies:
+            self._log("  [cyan]Skipping movies[/]")
+        if no_shows:
+            self._log("  [cyan]Skipping shows/episodes[/]")
 
-        # Sync movies (fetch, compare, apply, free)
-        if not await self._sync_movies(result, dry_run):
-            return None  # Cancelled
+        if not collection_only:
+            if not no_movies:
+                if not await self._sync_movies(result, dry_run):
+                    return None
+            else:
+                self._log("\n[dim]Phase 1: Skipped (--no-movies)[/]")
 
-        # Sync episodes (fetch, compare, apply, free)
-        if not await self._sync_episodes(result, dry_run):
-            return None  # Cancelled
+            if not no_shows:
+                if not await self._sync_episodes(result, dry_run):
+                    return None
+            else:
+                self._log("\n[dim]Phase 2: Skipped (--no-shows)[/]")
+        else:
+            self._log("\n[dim]Phase 1: Skipped (--collection-only)[/]")
+            self._log("\n[dim]Phase 2: Skipped (--collection-only)[/]")
 
-        # Sync collection (Plex library -> Trakt collection)
-        if not await self._sync_collection(result, dry_run):
-            return None  # Cancelled
+        if not await self._sync_collection(result, dry_run, no_movies=no_movies, no_shows=no_shows):
+            return None
 
-        # Sync watchlist (bidirectional)
-        if not await self._sync_watchlist(result, dry_run):
-            return None  # Cancelled
+        if not collection_only:
+            if not await self._sync_watchlist(result, dry_run):
+                return None
+        else:
+            self._log("\n[dim]Phase 4: Skipped (--collection-only)[/]")
 
         if dry_run:
             self._log("\n[yellow]Dry run complete - no changes applied[/]")
@@ -1393,25 +1426,14 @@ async def run_multi_server_sync(
     dry_run: bool = False,
     verbose: bool = False,
     fix_collection_dates: bool = False,
+    collection_only: bool = False,
+    no_movies: bool = False,
+    no_shows: bool = False,
     on_token_refresh: Callable[[dict], None] | None = None,
     log_callback: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
 ) -> SyncResult:
-    """Run sync across multiple Plex servers.
-
-    Args:
-        config: Main configuration
-        server_names: Optional list of server names to sync. If None, syncs all enabled servers.
-        dry_run: If True, don't make changes
-        verbose: Show detailed output
-        fix_collection_dates: Re-send all collection items with Plex addedAt dates
-        on_token_refresh: Callback when Trakt token is refreshed
-        log_callback: Callback for log messages
-        cancel_check: Callback to check if sync was cancelled
-
-    Returns:
-        Aggregated SyncResult from all servers
-    """
+    """Run sync across multiple Plex servers."""
     def log(msg: str):
         if log_callback:
             log_callback(msg)
@@ -1516,7 +1538,13 @@ async def run_multi_server_sync(
                 )
 
                 # Run sync for this server
-                result = await engine.sync(dry_run=dry_run, fix_collection_dates=fix_collection_dates)
+                result = await engine.sync(
+                    dry_run=dry_run,
+                    fix_collection_dates=fix_collection_dates,
+                    collection_only=collection_only,
+                    no_movies=no_movies,
+                    no_shows=no_shows,
+                )
 
                 if result:
                     # Aggregate results

@@ -95,6 +95,9 @@ class SyncRequest(BaseModel):
     dry_run: bool = False
     verbose: bool = False
     fix_collection_dates: bool = False
+    collection_only: bool = False
+    no_movies: bool = False
+    no_shows: bool = False
     servers: list[str] | None = None  # Optional list of server names to sync
 
 
@@ -498,6 +501,9 @@ def create_app() -> FastAPI:
                     dry_run=request.dry_run,
                     verbose=request.verbose,
                     fix_collection_dates=request.fix_collection_dates,
+                    collection_only=request.collection_only,
+                    no_movies=request.no_movies,
+                    no_shows=request.no_shows,
                     on_token_refresh=on_token_refresh,
                     log_callback=log,
                     cancel_check=is_cancelled,

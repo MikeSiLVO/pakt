@@ -39,7 +39,10 @@ def _make_token_refresh_callback(config: Config):
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed list of items to sync")
 @click.option("--server", "-s", "servers", multiple=True, help="Sync specific server(s) only (can specify multiple)")
 @click.option("--fix-collection-dates", is_flag=True, help="Re-send all collection items to Trakt with correct dates from Plex")
-def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_dates: bool):
+@click.option("--collection-only", is_flag=True, help="Only sync collection (skip watched, ratings, watchlist)")
+@click.option("--no-movies", is_flag=True, help="Skip movie sync")
+@click.option("--no-shows", is_flag=True, help="Skip show/episode sync")
+def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_dates: bool, collection_only: bool, no_movies: bool, no_shows: bool):
     """Sync watched status and ratings between Plex and Trakt."""
     from pakt.sync import run_multi_server_sync
 
@@ -60,6 +63,9 @@ def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_
         dry_run=dry_run,
         verbose=verbose,
         fix_collection_dates=fix_collection_dates,
+        collection_only=collection_only,
+        no_movies=no_movies,
+        no_shows=no_shows,
         on_token_refresh=_make_token_refresh_callback(config),
     ))
 
