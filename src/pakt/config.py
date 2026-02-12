@@ -55,7 +55,7 @@ class SyncConfig(BaseModel):
     collection_plex_to_trakt: bool = False
     watchlist_plex_to_trakt: bool = False
     watchlist_trakt_to_plex: bool = False
-    rating_priority: Literal["plex", "trakt", "newest"] = "newest"
+    rating_priority: Literal["none", "plex", "trakt", "newest"] = "none"
 
 
 class SchedulerConfig(BaseModel):

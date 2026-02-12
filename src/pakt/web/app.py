@@ -83,6 +83,7 @@ class ConfigUpdate(BaseModel):
     collection_plex_to_trakt: bool | None = None
     watchlist_plex_to_trakt: bool | None = None
     watchlist_trakt_to_plex: bool | None = None
+    rating_priority: str | None = None
     # Scheduler
     scheduler_enabled: bool | None = None
     scheduler_interval_hours: int | None = None
@@ -93,6 +94,7 @@ class SyncRequest(BaseModel):
 
     dry_run: bool = False
     verbose: bool = False
+    fix_collection_dates: bool = False
     servers: list[str] | None = None  # Optional list of server names to sync
 
 
@@ -144,6 +146,7 @@ async def _scheduled_sync() -> None:
             config.trakt.refresh_token = token["refresh_token"]
             config.trakt.expires_at = token["created_at"] + token["expires_in"]
             config.save()
+            invalidate_config_cache()
 
         result = await run_multi_server_sync(
             config,
@@ -158,6 +161,7 @@ async def _scheduled_sync() -> None:
             "added_to_plex": result.added_to_plex,
             "ratings_synced": result.ratings_synced,
             "collection_added": result.collection_added,
+            "collection_updated": result.collection_updated,
             "watchlist_added_trakt": result.watchlist_added_trakt,
             "watchlist_added_plex": result.watchlist_added_plex,
             "duration": result.duration_seconds,
@@ -389,6 +393,7 @@ def create_app() -> FastAPI:
                 "collection_plex_to_trakt": config.sync.collection_plex_to_trakt,
                 "watchlist_plex_to_trakt": config.sync.watchlist_plex_to_trakt,
                 "watchlist_trakt_to_plex": config.sync.watchlist_trakt_to_plex,
+                "rating_priority": config.sync.rating_priority,
             },
             "scheduler": {
                 "enabled": config.scheduler.enabled,
@@ -419,12 +424,15 @@ def create_app() -> FastAPI:
             config.sync.watchlist_plex_to_trakt = update.watchlist_plex_to_trakt
         if update.watchlist_trakt_to_plex is not None:
             config.sync.watchlist_trakt_to_plex = update.watchlist_trakt_to_plex
+        if update.rating_priority is not None and update.rating_priority in ("none", "plex", "trakt"):
+            config.sync.rating_priority = update.rating_priority
         if update.scheduler_enabled is not None:
             config.scheduler.enabled = update.scheduler_enabled
         if update.scheduler_interval_hours is not None:
             config.scheduler.interval_hours = update.scheduler_interval_hours
 
         config.save()
+        invalidate_config_cache()
 
         # Update scheduler if settings changed
         global _scheduler
@@ -473,6 +481,7 @@ def create_app() -> FastAPI:
                     config.trakt.refresh_token = token["refresh_token"]
                     config.trakt.expires_at = token["created_at"] + token["expires_in"]
                     config.save()
+                    invalidate_config_cache()
                     log("Token refreshed")
 
                 log("Loading configuration...")
@@ -488,6 +497,7 @@ def create_app() -> FastAPI:
                     server_names=request.servers,
                     dry_run=request.dry_run,
                     verbose=request.verbose,
+                    fix_collection_dates=request.fix_collection_dates,
                     on_token_refresh=on_token_refresh,
                     log_callback=log,
                     cancel_check=is_cancelled,
@@ -501,8 +511,8 @@ def create_app() -> FastAPI:
                     log(f"DETAIL:Watched - Added to Trakt: {result.added_to_trakt}")
                     log(f"DETAIL:Watched - Added to Plex: {result.added_to_plex}")
                     log(f"DETAIL:Ratings synced: {result.ratings_synced}")
-                    if result.collection_added:
-                        log(f"DETAIL:Collection added: {result.collection_added}")
+                    if result.collection_added or result.collection_updated:
+                        log(f"DETAIL:Collection added: {result.collection_added}, updated: {result.collection_updated}")
                     if result.watchlist_added_trakt or result.watchlist_added_plex:
                         wl_trakt = result.watchlist_added_trakt
                         wl_plex = result.watchlist_added_plex
@@ -514,6 +524,7 @@ def create_app() -> FastAPI:
                         "added_to_plex": result.added_to_plex,
                         "ratings_synced": result.ratings_synced,
                         "collection_added": result.collection_added,
+                        "collection_updated": result.collection_updated,
                         "watchlist_added_trakt": result.watchlist_added_trakt,
                         "watchlist_added_plex": result.watchlist_added_plex,
                         "duration": result.duration_seconds,
@@ -594,6 +605,7 @@ def create_app() -> FastAPI:
                 config.trakt.refresh_token = result.token["refresh_token"]
                 config.trakt.expires_at = result.token["created_at"] + result.token["expires_in"]
                 config.save()
+                invalidate_config_cache()
                 return {"status": "authenticated"}
             elif result.status == DeviceAuthStatus.PENDING:
                 return {"status": "pending"}
@@ -617,6 +629,7 @@ def create_app() -> FastAPI:
         config.trakt.refresh_token = ""
         config.trakt.expires_at = 0
         config.save()
+        invalidate_config_cache()
 
         return {"status": "ok", "revoked": success}
 
@@ -743,6 +756,7 @@ def create_app() -> FastAPI:
                 config = Config.load()
                 config.plex_token = token
                 config.save()
+                invalidate_config_cache()
                 return {"status": "authenticated", "token": token[:10] + "..."}
             else:
                 return {"status": "pending"}
@@ -863,6 +877,7 @@ def create_app() -> FastAPI:
 
         config.servers.append(new_server)
         config.save()
+        invalidate_config_cache()
         return {"status": "ok", "message": f"Added server: {request.name}"}
 
     @app.put("/api/servers/{name}")
@@ -897,6 +912,7 @@ def create_app() -> FastAPI:
                 setattr(server.sync, field, val)
 
         config.save()
+        invalidate_config_cache()
         return {"status": "ok"}
 
     @app.delete("/api/servers/{name}")
@@ -909,6 +925,7 @@ def create_app() -> FastAPI:
 
         config.servers = [s for s in config.servers if s.name != name]
         config.save()
+        invalidate_config_cache()
         return {"status": "ok", "message": f"Removed server: {name}"}
 
     @app.post("/api/servers/{name}/test")

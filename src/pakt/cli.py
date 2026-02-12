@@ -38,7 +38,8 @@ def _make_token_refresh_callback(config: Config):
 @click.option("--dry-run", is_flag=True, help="Show what would be synced without making changes")
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed list of items to sync")
 @click.option("--server", "-s", "servers", multiple=True, help="Sync specific server(s) only (can specify multiple)")
-def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...]):
+@click.option("--fix-collection-dates", is_flag=True, help="Re-send all collection items to Trakt with correct dates from Plex")
+def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_dates: bool):
     """Sync watched status and ratings between Plex and Trakt."""
     from pakt.sync import run_multi_server_sync
 
@@ -58,6 +59,7 @@ def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...]):
         server_names=server_names,
         dry_run=dry_run,
         verbose=verbose,
+        fix_collection_dates=fix_collection_dates,
         on_token_refresh=_make_token_refresh_callback(config),
     ))
 
@@ -65,6 +67,8 @@ def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...]):
     console.print(f"  Added to Trakt: {result.added_to_trakt}")
     console.print(f"  Added to Plex: {result.added_to_plex}")
     console.print(f"  Ratings synced: {result.ratings_synced}")
+    if result.collection_added or result.collection_updated:
+        console.print(f"  Collection added: {result.collection_added}, updated: {result.collection_updated}")
     console.print(f"  Duration: {result.duration_seconds:.1f}s")
 
     if result.errors:
