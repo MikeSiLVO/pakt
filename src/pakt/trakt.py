@@ -194,8 +194,15 @@ class TraktClient:
                 return response
 
             except httpx.HTTPStatusError as e:
-                if e.response.status_code == 429 and attempt < retries - 1:
-                    continue
+                if attempt < retries - 1:
+                    status = e.response.status_code
+                    if status == 429:
+                        continue
+                    if status in (502, 503, 504):
+                        wait = 2 ** attempt
+                        console.print(f"[yellow]Trakt {status}, retrying in {wait}s (attempt {attempt + 1}/{retries})[/]")
+                        await asyncio.sleep(wait)
+                        continue
                 raise
 
         raise TraktRateLimitError(60)
