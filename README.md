@@ -60,6 +60,10 @@ pakt sync --server NAME      # Sync specific server(s) only
 pakt sync -s NAME -s NAME2   # Sync multiple specific servers
 pakt sync --dry-run          # Preview without making changes
 pakt sync --verbose          # Show detailed item list
+pakt sync --collection-only  # Only sync collection (skip watched, ratings, watchlist)
+pakt sync --no-movies        # Skip movie sync
+pakt sync --no-shows         # Skip show/episode sync
+pakt sync --fix-collection-dates  # Re-send all collection items with correct dates from Plex
 ```
 
 ### Libraries
@@ -152,7 +156,7 @@ See the [Docker Guide](https://github.com/MikeSiLVO/Pakt/blob/main/docs/docker.m
 | Collection | ✓ | - |
 | Watchlist | ✓ | ✓ |
 
-Collection sync includes media info (resolution, HDR, audio codec).
+Collection sync includes media info (resolution, HDR, audio codec) and uses Plex's `addedAt` date for `collected_at` timestamps.
 
 ## Multi-Server Support
 
@@ -175,6 +179,16 @@ Config location:
 - Linux/macOS: `~/.config/pakt`
 
 All configuration is stored in `config.json`. See the [Configuration Reference](https://github.com/MikeSiLVO/Pakt/blob/main/docs/configuration.md) for all options.
+
+### Rating Priority
+
+When both Plex and Trakt have different ratings for the same item, the `rating_priority` setting controls which wins:
+
+- `none` (default) - Don't change either side, keep both as-is
+- `plex` - Plex rating overwrites Trakt
+- `trakt` - Trakt rating overwrites Plex
+
+Set in `config.json` under `sync.rating_priority`.
 
 ### Web Server
 

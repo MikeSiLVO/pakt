@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.3.0] - 2026-02-12
+
+### Added
+- **Collection dates** - Collection sync now sends `collected_at` timestamps from Plex's `addedAt` field instead of using the sync date
+- **Fix collection dates** - `pakt sync --fix-collection-dates` re-sends all collection items to update dates on Trakt
+- **Sync filter flags** - `--collection-only`, `--no-movies`, `--no-shows` to control which sync phases run
+- **Rating priority** - New `rating_priority` config setting (`none`/`plex`/`trakt`) to resolve conflicts when both sides have different ratings
+- **Trakt 5xx retry** - Transient Trakt server errors (502/503/504) are now retried with exponential backoff
+
+### Fixed
+- **Watchlist sync crash** - Variable shadowing in Plex Discover search caused `AttributeError` when adding items to Plex watchlist
+- **Verbose watchlist crash** - `.get()` called on PlexAPI objects instead of `getattr()` in verbose logging
+- **Empty episode library crash** - `ZeroDivisionError` when show libraries exist but contain no episodes
+- **Config cache** - Web API now invalidates config cache after saves
+- **Log file missing dates** - Rich markup stripping was removing bracketed dates like `[2019-06-17]` from log file
+- **Silent phase skips** - Disabled sync phases (collection, watchlist) now log skip reason instead of producing no output
+
 ## [0.2.2] - 2025-01-21
 
 ### Added

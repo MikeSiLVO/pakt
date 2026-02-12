@@ -95,7 +95,7 @@ class TraktClient:
     async def __aenter__(self) -> TraktClient:
         self._client = httpx.AsyncClient(
             base_url=TRAKT_API_URL,
-            timeout=30.0,
+            timeout=60.0,
             headers=self._headers,
         )
         # Check if token needs refresh on entry

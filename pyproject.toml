@@ -1,6 +1,6 @@
 [project]
 name = "pakt"
-version = "0.2.2"
+version = "0.3.0"
 description = "Fast, efficient Plex-Trakt sync using batch API operations"
 readme = "README.md"
 requires-python = ">=3.11"

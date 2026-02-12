@@ -298,7 +298,7 @@ class SyncEngine:
             display_msg = msg
 
         # Strip rich markup tags but preserve non-markup brackets like [2019-06-17]
-        clean_msg = re.sub(r'\[/?[a-zA-Z#][^\]]*\]', '', display_msg)
+        clean_msg = re.sub(r'\[/\]|\[/?[a-zA-Z#][^\]]*\]', '', display_msg)
 
         # Always log to file
         get_file_logger().info(clean_msg)
@@ -1066,17 +1066,30 @@ class SyncEngine:
             self._progress(3, 4, 80, "Adding to Trakt collection")
             try:
                 if movies_to_collect:
-                    self._log(f"  Sending {len(movies_to_collect)} movies to Trakt collection...")
-                    response = await self.trakt.add_to_collection(movies=movies_to_collect)
-                    result.collection_added += response.get("added", {}).get("movies", 0)
-                    result.collection_updated += response.get("updated", {}).get("movies", 0)
+                    n_movies = len(movies_to_collect)
+                    batch_size = 500
+                    n_batches = (n_movies + batch_size - 1) // batch_size
+                    self._log(f"  Sending {n_movies} movies to Trakt collection ({n_batches} batch{'es' if n_batches > 1 else ''})...")
+                    for i in range(0, n_movies, batch_size):
+                        batch = movies_to_collect[i:i + batch_size]
+                        if n_batches > 1:
+                            self._log(f"    Batch {i // batch_size + 1}/{n_batches} ({len(batch)} movies)...")
+                        response = await self.trakt.add_to_collection(movies=batch)
+                        result.collection_added += response.get("added", {}).get("movies", 0)
+                        result.collection_updated += response.get("updated", {}).get("movies", 0)
 
                 if shows_to_collect:
                     n_shows = len(shows_to_collect)
-                    self._log(f"  Sending {n_shows} shows ({total_new_episodes} episodes) to Trakt collection...")
-                    response = await self.trakt.add_to_collection(shows=shows_to_collect)
-                    result.collection_added += response.get("added", {}).get("episodes", 0)
-                    result.collection_updated += response.get("updated", {}).get("episodes", 0)
+                    batch_size = 100
+                    n_batches = (n_shows + batch_size - 1) // batch_size
+                    self._log(f"  Sending {n_shows} shows ({total_new_episodes} episodes) to Trakt collection ({n_batches} batch{'es' if n_batches > 1 else ''})...")
+                    for i in range(0, n_shows, batch_size):
+                        batch = shows_to_collect[i:i + batch_size]
+                        if n_batches > 1:
+                            self._log(f"    Batch {i // batch_size + 1}/{n_batches} ({len(batch)} shows)...")
+                        response = await self.trakt.add_to_collection(shows=batch)
+                        result.collection_added += response.get("added", {}).get("episodes", 0)
+                        result.collection_updated += response.get("updated", {}).get("episodes", 0)
             except TraktAccountLimitError as e:
                 self._log(f"  [red]ERROR: {e}[/]")
                 if not e.is_vip:
@@ -1558,7 +1571,7 @@ async def run_multi_server_sync(
                     total_result.errors.extend(result.errors)
 
             except Exception as e:
-                error_msg = f"[{server_config.name}] Error: {e}"
+                error_msg = f"[{server_config.name}] Error: {type(e).__name__}: {e}"
                 log(f"ERROR:{error_msg}")
                 total_result.errors.append(error_msg)
                 # Continue with next server instead of failing entirely
