@@ -9,6 +9,7 @@ import re
 import threading
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from rich.console import Console
@@ -71,6 +72,7 @@ def _process_episodes_in_thread(
     sync_watched_trakt_to_plex: bool,
     sync_ratings_plex_to_trakt: bool,
     sync_ratings_trakt_to_plex: bool,
+    rating_priority: str,
     cancel_event: threading.Event,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> EpisodeProcessingResult:
@@ -154,7 +156,20 @@ def _process_episodes_in_thread(
 
         trakt_ep_rating_val = trakt_ep_rating["rating"] if trakt_ep_rating else None
 
+        # Determine if rating should sync to Trakt
+        sync_rating_to_trakt = False
+        sync_rating_to_plex = False
         if plex_ep_rating_int and not trakt_ep_rating_val and sync_ratings_plex_to_trakt:
+            sync_rating_to_trakt = True
+        elif trakt_ep_rating_val and not plex_ep_rating_int and sync_ratings_trakt_to_plex:
+            sync_rating_to_plex = True
+        elif plex_ep_rating_int and trakt_ep_rating_val and plex_ep_rating_int != trakt_ep_rating_val:
+            if rating_priority == "plex":
+                sync_rating_to_trakt = True
+            elif rating_priority == "trakt":
+                sync_rating_to_plex = True
+
+        if sync_rating_to_trakt:
             ep_ids = {}
             if show_ids.tvdb:
                 ep_ids["tvdb"] = show_ids.tvdb
@@ -171,7 +186,7 @@ def _process_episodes_in_thread(
                 result.episodes_to_rate_trakt_display.append(
                     f"{show_title} S{season_num:02d}E{ep_num:02d} = {plex_ep_rating_int}"
                 )
-        elif trakt_ep_rating_val and not plex_ep_rating_int and sync_ratings_trakt_to_plex:
+        elif sync_rating_to_plex:
             result.episodes_to_rate_plex.append((episode, trakt_ep_rating_val))
 
     return result
@@ -205,6 +220,18 @@ def get_file_logger() -> logging.Logger:
     return _file_logger
 
 
+def _plex_dt_to_utc_iso(dt: datetime | None) -> str | None:
+    """Convert a naive local datetime from PlexAPI to UTC ISO 8601 for Trakt.
+
+    PlexAPI uses datetime.fromtimestamp() which gives naive local time.
+    We assume local timezone and convert to UTC for Trakt.
+    """
+    if dt is None:
+        return None
+    # PlexAPI gives naive local time; astimezone() assumes local if no tzinfo
+    return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+
+
 class SyncEngine:
     """Main sync engine coordinating Plex and Trakt."""
 
@@ -230,6 +257,7 @@ class SyncEngine:
         self._server_config = server_config
         self._trakt_cache = trakt_cache
         self._account_limits: AccountLimits | None = None
+        self._fix_collection_dates = False
 
     def _get_sync_option(self, option: str) -> bool:
         """Get effective sync option, checking server override first."""
@@ -434,6 +462,16 @@ class SyncEngine:
                             movies_to_rate_trakt.append(movie_data)
                     elif trakt_rating_val and not plex_rating and self._get_sync_option("ratings_trakt_to_plex"):
                         movies_to_rate_plex.append((plex_movie, trakt_rating_val))
+                    elif plex_rating and trakt_rating_val and plex_rating != trakt_rating_val:
+                        # Both sides have different ratings — use priority setting
+                        priority = self.config.sync.rating_priority
+                        if priority == "plex":
+                            movie_data = self._build_trakt_movie(plex_movie, plex_ids)
+                            if movie_data:
+                                movie_data["rating"] = plex_rating
+                                movies_to_rate_trakt.append(movie_data)
+                        elif priority == "trakt":
+                            movies_to_rate_plex.append((plex_movie, trakt_rating_val))
 
                     processed += 1
 
@@ -608,6 +646,7 @@ class SyncEngine:
                 self._get_sync_option("watched_trakt_to_plex"),
                 self._get_sync_option("ratings_plex_to_trakt"),
                 self._get_sync_option("ratings_trakt_to_plex"),
+                self.config.sync.rating_priority,
                 cancel_event,
                 on_progress,
             )
@@ -628,7 +667,7 @@ class SyncEngine:
 
                 # Update progress display
                 processed = progress_state["processed"]
-                pct = 35 + (processed / total_episodes) * 50
+                pct = 35 + (processed / max(1, total_episodes)) * 50
                 self._progress(2, 4, pct, f"Episodes {processed}/{total_episodes}")
                 progress.update(task, completed=processed, description=f"Episodes {processed}/{total_episodes}")
 
@@ -860,12 +899,13 @@ class SyncEngine:
                     continue
                 processed_movie_ids.add(movie_key)
 
-            # Check if already in collection
+            # Check if already in collection (skip check when fixing dates)
             in_collection = False
-            if plex_ids.imdb and plex_ids.imdb in collected_movies_by_imdb:
-                in_collection = True
-            elif plex_ids.tmdb and plex_ids.tmdb in collected_movies_by_tmdb:
-                in_collection = True
+            if not self._fix_collection_dates:
+                if plex_ids.imdb and plex_ids.imdb in collected_movies_by_imdb:
+                    in_collection = True
+                elif plex_ids.tmdb and plex_ids.tmdb in collected_movies_by_tmdb:
+                    in_collection = True
 
             if not in_collection:
                 movie_data = self._build_trakt_movie(plex_movie, plex_ids)
@@ -873,6 +913,9 @@ class SyncEngine:
                     # Add media metadata
                     metadata = extract_media_metadata(plex_movie)
                     movie_data.update(metadata)
+                    collected_at = _plex_dt_to_utc_iso(getattr(plex_movie, "addedAt", None))
+                    if collected_at:
+                        movie_data["collected_at"] = collected_at
                     movies_to_collect.append(movie_data)
 
         del plex_movies
@@ -915,12 +958,13 @@ class SyncEngine:
                 continue
             processed_episode_ids.add(ep_key)
 
-            # Check if episode already in collection
+            # Check if episode already in collection (skip check when fixing dates)
             in_collection = False
-            if show_ids.imdb and (show_ids.imdb, season_num, ep_num) in collected_episodes:
-                in_collection = True
-            elif show_ids.tvdb and (show_ids.tvdb, season_num, ep_num) in collected_episodes:
-                in_collection = True
+            if not self._fix_collection_dates:
+                if show_ids.imdb and (show_ids.imdb, season_num, ep_num) in collected_episodes:
+                    in_collection = True
+                elif show_ids.tvdb and (show_ids.tvdb, season_num, ep_num) in collected_episodes:
+                    in_collection = True
 
             if not in_collection:
                 # Determine if this is a new show or existing show with new episodes
@@ -940,8 +984,9 @@ class SyncEngine:
                         "new_show": not show_in_collection,
                         "episodes": [],
                     }
+                added_at = getattr(episode, "addedAt", None)
                 shows_to_update[show_data_key]["episodes"].append(
-                    (season_num, ep_num, episode.title)
+                    (season_num, ep_num, episode.title, added_at)
                 )
 
         del plex_episodes, plex_shows, plex_show_ids_by_key
@@ -952,10 +997,11 @@ class SyncEngine:
         existing_shows_with_new_eps = [s for s in shows_to_update.values() if not s["new_show"]]
         total_new_episodes = sum(len(s["episodes"]) for s in shows_to_update.values())
 
-        self._log(f"  Collection - Movies to add: {len(movies_to_collect)}")
-        self._log(f"  Collection - New shows to add: {len(new_shows)}")
-        self._log(f"  Collection - Existing shows with new episodes: {len(existing_shows_with_new_eps)}")
-        self._log(f"  Collection - Total new episodes: {total_new_episodes}")
+        verb = "to sync" if self._fix_collection_dates else "to add"
+        self._log(f"  Collection - Movies {verb}: {len(movies_to_collect)}")
+        self._log(f"  Collection - New shows {verb}: {len(new_shows)}")
+        self._log(f"  Collection - Existing shows with episodes {verb}: {len(existing_shows_with_new_eps)}")
+        self._log(f"  Collection - Total episodes {verb}: {total_new_episodes}")
 
         if self._verbose:
             for m in movies_to_collect:
@@ -968,9 +1014,9 @@ class SyncEngine:
             for s in existing_shows_with_new_eps:
                 episodes = s["episodes"]
                 if len(episodes) <= 5:
-                    ep_list = ", ".join(f"S{se:02d}E{ep:02d}" for se, ep, _ in episodes)
+                    ep_list = ", ".join(f"S{se:02d}E{ep:02d}" for se, ep, *_ in episodes)
                 else:
-                    first_5 = ", ".join(f"S{se:02d}E{ep:02d}" for se, ep, _ in episodes[:5])
+                    first_5 = ", ".join(f"S{se:02d}E{ep:02d}" for se, ep, *_ in episodes[:5])
                     ep_list = f"{first_5} (+{len(episodes)-5} more)"
                 self._log(f"    [dim]→ Collection: {s['title']} - {ep_list}[/]")
 
@@ -987,10 +1033,14 @@ class SyncEngine:
 
             # Group episodes by season
             seasons_dict: dict[int, list[dict]] = {}
-            for season_num, ep_num, _ in show_data["episodes"]:
+            for season_num, ep_num, _, added_at in show_data["episodes"]:
                 if season_num not in seasons_dict:
                     seasons_dict[season_num] = []
-                seasons_dict[season_num].append({"number": ep_num})
+                ep_data: dict = {"number": ep_num}
+                collected_at = _plex_dt_to_utc_iso(added_at)
+                if collected_at:
+                    ep_data["collected_at"] = collected_at
+                seasons_dict[season_num].append(ep_data)
 
             seasons = [{"number": s, "episodes": eps} for s, eps in sorted(seasons_dict.items())]
 
@@ -1006,15 +1056,17 @@ class SyncEngine:
             self._progress(3, 4, 80, "Adding to Trakt collection")
             try:
                 if movies_to_collect:
-                    self._log(f"  Adding {len(movies_to_collect)} movies to Trakt collection...")
+                    self._log(f"  Sending {len(movies_to_collect)} movies to Trakt collection...")
                     response = await self.trakt.add_to_collection(movies=movies_to_collect)
                     result.collection_added += response.get("added", {}).get("movies", 0)
+                    result.collection_updated += response.get("updated", {}).get("movies", 0)
 
                 if shows_to_collect:
                     n_shows = len(shows_to_collect)
-                    self._log(f"  Adding {n_shows} shows ({total_new_episodes} episodes) to Trakt collection...")
+                    self._log(f"  Sending {n_shows} shows ({total_new_episodes} episodes) to Trakt collection...")
                     response = await self.trakt.add_to_collection(shows=shows_to_collect)
                     result.collection_added += response.get("added", {}).get("episodes", 0)
+                    result.collection_updated += response.get("updated", {}).get("episodes", 0)
             except TraktAccountLimitError as e:
                 self._log(f"  [red]ERROR: {e}[/]")
                 if not e.is_vip:
@@ -1191,11 +1243,11 @@ class SyncEngine:
                     # Search Plex Discover for this movie
                     try:
                         results = self.plex.search_discover(title, libtype="movie")
-                        for result in results[:5]:  # Check top 5 results
-                            result_ids = extract_plex_ids(result)
-                            if (ids.get("imdb") and result_ids.imdb == ids["imdb"]) or \
-                               (ids.get("tmdb") and result_ids.tmdb == ids["tmdb"]):
-                                items_to_add_plex.append(result)
+                        for match in results[:5]:
+                            match_ids = extract_plex_ids(match)
+                            if (ids.get("imdb") and match_ids.imdb == ids["imdb"]) or \
+                               (ids.get("tmdb") and match_ids.tmdb == ids["tmdb"]):
+                                items_to_add_plex.append(match)
                                 break
                     except Exception as e:
                         self._log(f"  [yellow]Warning: Could not search for '{title}': {e}[/]")
@@ -1220,11 +1272,11 @@ class SyncEngine:
                     # Search Plex Discover for this show
                     try:
                         results = self.plex.search_discover(title, libtype="show")
-                        for result in results[:5]:  # Check top 5 results
-                            result_ids = extract_plex_ids(result)
-                            if (ids.get("imdb") and result_ids.imdb == ids["imdb"]) or \
-                               (ids.get("tvdb") and result_ids.tvdb == ids["tvdb"]):
-                                items_to_add_plex.append(result)
+                        for match in results[:5]:
+                            match_ids = extract_plex_ids(match)
+                            if (ids.get("imdb") and match_ids.imdb == ids["imdb"]) or \
+                               (ids.get("tvdb") and match_ids.tvdb == ids["tvdb"]):
+                                items_to_add_plex.append(match)
                                 break
                     except Exception as e:
                         self._log(f"  [yellow]Warning: Could not search for '{title}': {e}[/]")
@@ -1238,7 +1290,7 @@ class SyncEngine:
             for s in shows_to_add_trakt:
                 self._log(f"    [dim]→ Trakt watchlist: {s.get('title')} ({s.get('year')})[/]")
             for item in items_to_add_plex:
-                self._log(f"    [dim]→ Plex watchlist: {item.get('title')} ({item.get('year')})[/]")
+                self._log(f"    [dim]→ Plex watchlist: {getattr(item, 'title', '?')} ({getattr(item, 'year', '?')})[/]")
 
         # Apply changes
         if not dry_run:
@@ -1277,8 +1329,9 @@ class SyncEngine:
 
         return True
 
-    async def sync(self, dry_run: bool = False) -> SyncResult | None:
+    async def sync(self, dry_run: bool = False, fix_collection_dates: bool = False) -> SyncResult | None:
         """Run full sync."""
+        self._fix_collection_dates = fix_collection_dates
         start_time = time.time()
         result = SyncResult()
 
@@ -1289,6 +1342,8 @@ class SyncEngine:
 
         self._log("[bold]Starting Pakt sync...[/]")
         self._log(f"  Mode: {'Dry run' if dry_run else 'Live sync'}")
+        if fix_collection_dates:
+            self._log("  [yellow]Fix collection dates: re-sending all items with Plex addedAt dates[/]")
 
         # Sync movies (fetch, compare, apply, free)
         if not await self._sync_movies(result, dry_run):
@@ -1337,6 +1392,7 @@ async def run_multi_server_sync(
     server_names: list[str] | None = None,
     dry_run: bool = False,
     verbose: bool = False,
+    fix_collection_dates: bool = False,
     on_token_refresh: Callable[[dict], None] | None = None,
     log_callback: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
@@ -1348,6 +1404,7 @@ async def run_multi_server_sync(
         server_names: Optional list of server names to sync. If None, syncs all enabled servers.
         dry_run: If True, don't make changes
         verbose: Show detailed output
+        fix_collection_dates: Re-send all collection items with Plex addedAt dates
         on_token_refresh: Callback when Trakt token is refreshed
         log_callback: Callback for log messages
         cancel_check: Callback to check if sync was cancelled
@@ -1459,7 +1516,7 @@ async def run_multi_server_sync(
                 )
 
                 # Run sync for this server
-                result = await engine.sync(dry_run=dry_run)
+                result = await engine.sync(dry_run=dry_run, fix_collection_dates=fix_collection_dates)
 
                 if result:
                     # Aggregate results
@@ -1467,6 +1524,7 @@ async def run_multi_server_sync(
                     total_result.added_to_plex += result.added_to_plex
                     total_result.ratings_synced += result.ratings_synced
                     total_result.collection_added += result.collection_added
+                    total_result.collection_updated += result.collection_updated
                     total_result.watchlist_added_trakt += result.watchlist_added_trakt
                     total_result.watchlist_added_plex += result.watchlist_added_plex
                     total_result.errors.extend(result.errors)

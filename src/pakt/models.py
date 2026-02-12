@@ -81,6 +81,7 @@ class SyncResult(BaseModel):
     added_to_plex: int = 0
     ratings_synced: int = 0
     collection_added: int = 0
+    collection_updated: int = 0
     watchlist_added_trakt: int = 0
     watchlist_added_plex: int = 0
     errors: list[str] = Field(default_factory=list)
