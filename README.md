@@ -2,6 +2,8 @@
 
 Sync watched status, ratings, and collections between Plex and Trakt.
 
+If you find Pakt useful, [buy me a coffee](https://ko-fi.com/mikesilvo) ☕
+
 ## Installation
 
 ```bash
