@@ -92,6 +92,10 @@ pakt sync -s Server1 -s Server2  # Sync multiple servers
 | `--dry-run` | | Preview what would sync without making changes |
 | `--verbose` | `-v` | Show detailed list of items being synced |
 | `--server NAME` | `-s` | Sync specific server(s) only (can repeat) |
+| `--collection-only` | | Only sync collection (skip watched, ratings, watchlist) |
+| `--no-movies` | | Skip movie sync |
+| `--no-shows` | | Skip show/episode sync |
+| `--fix-collection-dates` | | Re-send all collection items with correct dates from Plex |
 
 ---
 

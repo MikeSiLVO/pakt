@@ -202,9 +202,9 @@ Set rating priority in config:
 ```
 
 Options:
+- `"none"` - Skip conflicting ratings (default)
 - `"plex"` - Plex rating always wins
 - `"trakt"` - Trakt rating always wins
-- `"newest"` - Most recently changed rating wins
 
 ---
 

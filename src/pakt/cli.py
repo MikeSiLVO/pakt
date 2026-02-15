@@ -492,11 +492,13 @@ def serve(host: str | None, port: int | None, tray: bool | None):
             pass
 
     # Redirect stdout/stderr to devnull in silent mode (for pythonw)
+    # Kept open for process lifetime — intentionally not closed
+    _devnull = None
     if silent_mode:
         try:
-            devnull = open(os.devnull, 'w')
-            sys.stdout = devnull
-            sys.stderr = devnull
+            _devnull = open(os.devnull, 'w')
+            sys.stdout = _devnull
+            sys.stderr = _devnull
         except Exception:
             pass
 
@@ -615,6 +617,8 @@ def serve(host: str | None, port: int | None, tray: bool | None):
         log("Shutting down")
         if debug_log:
             debug_log.close()
+        if _devnull:
+            _devnull.close()
         if tray_instance:
             tray_instance.stop()
 

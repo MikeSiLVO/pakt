@@ -55,7 +55,7 @@ class SyncConfig(BaseModel):
     collection_plex_to_trakt: bool = False
     watchlist_plex_to_trakt: bool = False
     watchlist_trakt_to_plex: bool = False
-    rating_priority: Literal["none", "plex", "trakt", "newest"] = "none"
+    rating_priority: Literal["none", "plex", "trakt"] = "none"
 
 
 class SchedulerConfig(BaseModel):
@@ -63,7 +63,6 @@ class SchedulerConfig(BaseModel):
 
     enabled: bool = False
     interval_hours: int = 0
-    run_on_startup: bool = False
 
 
 class WebConfig(BaseModel):
@@ -202,7 +201,6 @@ def _migrate_legacy_config(config_dir: Path) -> Config | None:
     # Scheduler config
     config.scheduler.enabled = parse_bool(env_vars.get("PAKT_SCHEDULER_ENABLED", "false"))
     config.scheduler.interval_hours = int(env_vars.get("PAKT_SCHEDULER_INTERVAL_HOURS", "0") or "0")
-    config.scheduler.run_on_startup = parse_bool(env_vars.get("PAKT_SCHEDULER_RUN_ON_STARTUP", "false"))
 
     # Legacy Plex config - create a server if URL and token exist
     legacy_plex_url = env_vars.get("PLEX_URL", "")

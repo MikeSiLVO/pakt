@@ -146,8 +146,7 @@ Enable in the web UI (Settings → Scheduled Sync) or edit config:
 {
   "scheduler": {
     "enabled": true,
-    "interval_hours": 24,
-    "run_on_startup": true
+    "interval_hours": 24
   }
 }
 ```

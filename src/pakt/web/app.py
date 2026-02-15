@@ -15,6 +15,7 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
 
+from pakt import __version__
 from pakt.config import Config, ServerConfig, get_config_dir
 from pakt.sync import run_multi_server_sync
 
@@ -209,7 +210,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="Pakt",
         description="Plex-Trakt sync",
-        version="0.1.0",
+        version=__version__,
         lifespan=lifespan,
     )
 
@@ -233,7 +234,9 @@ def create_app() -> FastAPI:
     @app.get("/assets/{filename}")
     async def serve_asset(filename: str):
         """Serve static assets."""
-        file_path = assets_dir / filename
+        file_path = (assets_dir / filename).resolve()
+        if not file_path.is_relative_to(assets_dir.resolve()):
+            return HTMLResponse(status_code=404, content="Not found")
         if file_path.exists() and file_path.is_file():
             media_type = "image/png" if filename.endswith(".png") else "image/svg+xml"
             return FileResponse(file_path, media_type=media_type)
@@ -726,17 +729,27 @@ def create_app() -> FastAPI:
     # Plex PIN Authentication
     # =========================================================================
 
-    # Store active PIN logins (pin_id -> login object)
-    _plex_pin_logins: dict[int, Any] = {}
+    # Store active PIN logins (pin_id -> (timestamp, login object))
+    _plex_pin_logins: dict[int, tuple[float, Any]] = {}
+    _PIN_MAX_AGE = 600  # 10 minutes (matches Plex PIN expiry)
+
+    def _cleanup_expired_pins() -> None:
+        """Remove PIN logins older than max age."""
+        now = time.time()
+        expired = [pid for pid, (ts, _) in _plex_pin_logins.items() if now - ts > _PIN_MAX_AGE]
+        for pid in expired:
+            del _plex_pin_logins[pid]
 
     @app.post("/api/plex/pin")
     async def start_plex_pin_login() -> dict[str, Any]:
         """Start Plex PIN login flow."""
         from pakt.plex import start_plex_pin_login as _start_pin
 
+        _cleanup_expired_pins()
+
         try:
             login_obj, auth_info = _start_pin()
-            _plex_pin_logins[auth_info.pin_id] = login_obj
+            _plex_pin_logins[auth_info.pin_id] = (time.time(), login_obj)
             return {
                 "status": "ok",
                 "pin": auth_info.pin,
@@ -751,11 +764,12 @@ def create_app() -> FastAPI:
         """Check if Plex PIN login has been authorized."""
         from pakt.plex import check_plex_pin_login as _check_pin
 
-        login_obj = _plex_pin_logins.get(pin_id)
-        if not login_obj:
+        entry = _plex_pin_logins.get(pin_id)
+        if not entry:
             return {"status": "error", "message": "PIN login not found or expired"}
 
         try:
+            _, login_obj = entry
             token = _check_pin(login_obj)
             if token:
                 del _plex_pin_logins[pin_id]

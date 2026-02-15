@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.3.1] - 2026-02-14
+
+### Fixed
+- **Rating conflict resolution** - Rating priority (`plex`/`trakt`) now respects sync direction settings instead of always overwriting
+- **Path traversal guard** - Asset endpoint validates resolved path stays within assets directory
+- **PIN login memory leak** - Abandoned Plex PIN logins now expire after 10 minutes
+- **File handle leak** - devnull handle in silent serve mode now properly closed on shutdown
+
+### Removed
+- **`rating_priority: "newest"`** - Removed unimplemented option; use `"none"`, `"plex"`, or `"trakt"`
+- **`run_on_startup` scheduler setting** - Removed unused config field
+
+### Docs
+- Updated CLI reference with missing sync flags (`--collection-only`, `--no-movies`, `--no-shows`, `--fix-collection-dates`)
+- Fixed stale version in `__init__.py` and FastAPI app
+
 ## [0.3.0] - 2026-02-12
 
 ### Added

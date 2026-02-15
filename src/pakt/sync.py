@@ -164,9 +164,9 @@ def _process_episodes_in_thread(
         elif trakt_ep_rating_val and not plex_ep_rating_int and sync_ratings_trakt_to_plex:
             sync_rating_to_plex = True
         elif plex_ep_rating_int and trakt_ep_rating_val and plex_ep_rating_int != trakt_ep_rating_val:
-            if rating_priority == "plex":
+            if rating_priority == "plex" and sync_ratings_plex_to_trakt:
                 sync_rating_to_trakt = True
-            elif rating_priority == "trakt":
+            elif rating_priority == "trakt" and sync_ratings_trakt_to_plex:
                 sync_rating_to_plex = True
 
         if sync_rating_to_trakt:
@@ -465,12 +465,12 @@ class SyncEngine:
                     elif plex_rating and trakt_rating_val and plex_rating != trakt_rating_val:
                         # Both sides have different ratings — use priority setting
                         priority = self.config.sync.rating_priority
-                        if priority == "plex":
+                        if priority == "plex" and self._get_sync_option("ratings_plex_to_trakt"):
                             movie_data = self._build_trakt_movie(plex_movie, plex_ids)
                             if movie_data:
                                 movie_data["rating"] = plex_rating
                                 movies_to_rate_trakt.append(movie_data)
-                        elif priority == "trakt":
+                        elif priority == "trakt" and self._get_sync_option("ratings_trakt_to_plex"):
                             movies_to_rate_plex.append((plex_movie, trakt_rating_val))
 
                     processed += 1

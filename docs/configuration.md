@@ -23,12 +23,11 @@ Complete reference for Pakt's `config.json` settings. See also the main [README]
     "collection_plex_to_trakt": false,
     "watchlist_plex_to_trakt": false,
     "watchlist_trakt_to_plex": false,
-    "rating_priority": "newest"
+    "rating_priority": "none"
   },
   "scheduler": {
     "enabled": false,
     "interval_hours": 0,
-    "run_on_startup": false
   },
   "plex_token": "your-plex-account-token",
   "servers": [
@@ -81,7 +80,7 @@ Global sync behavior. These can be overridden per-server.
 | `collection_plex_to_trakt` | boolean | `false` | Sync Plex library to Trakt collection |
 | `watchlist_plex_to_trakt` | boolean | `false` | Sync Plex watchlist to Trakt |
 | `watchlist_trakt_to_plex` | boolean | `false` | Sync Trakt watchlist to Plex |
-| `rating_priority` | string | `"newest"` | Which rating wins on conflict: `"plex"`, `"trakt"`, or `"newest"` |
+| `rating_priority` | string | `"none"` | Which rating wins on conflict: `"none"` (skip), `"plex"`, or `"trakt"` |
 
 **Notes:**
 - Collection sync includes media metadata (resolution, HDR, audio codec)
@@ -98,7 +97,6 @@ Automatic sync scheduling. Only active while `pakt serve` is running.
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable automatic scheduled syncs |
 | `interval_hours` | integer | `0` | Hours between syncs (0 = disabled) |
-| `run_on_startup` | boolean | `false` | Run a sync immediately when server starts |
 
 ---
 
