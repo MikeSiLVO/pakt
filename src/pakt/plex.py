@@ -11,7 +11,7 @@ from plexapi.myplex import MyPlexAccount, MyPlexPinLogin
 from plexapi.server import PlexServer
 from plexapi.video import Episode, Movie, Show
 
-from pakt.config import ServerConfig
+from pakt.config import Config, ServerConfig
 from pakt.models import MediaItem, MediaType, PlexIds
 
 logger = logging.getLogger(__name__)
@@ -172,14 +172,65 @@ class PlexClient:
         self._account: MyPlexAccount | None = None
 
     def connect(self) -> None:
-        """Connect to Plex server."""
+        """Connect to Plex server.
+
+        Prefers discovery via server_name (which negotiates the correct
+        server access token) over direct URL+token, since account tokens
+        don't work for plex.direct URLs. Falls back to direct connection
+        if discovery is unavailable.
+        """
+        if self._token and self._server_name:
+            try:
+                logger.debug("Connecting to '%s' via plex.tv discovery", self._server_name)
+                account = MyPlexAccount(token=self._token)
+                self._server = account.resource(self._server_name).connect()
+                self._persist_connection()
+                return
+            except Exception as e:
+                if not self._url:
+                    raise
+                logger.warning(
+                    "Discovery connect to '%s' failed (%s), trying direct URL",
+                    self._server_name, e,
+                )
+
         if self._url and self._token:
+            logger.debug("Connecting directly to %s", self._url)
             self._server = PlexServer(self._url, self._token)
-        elif self._token and self._server_name:
-            account = MyPlexAccount(token=self._token)
-            self._server = account.resource(self._server_name).connect()
         else:
             raise ValueError("Need either URL+token or token+server_name")
+
+    def _persist_connection(self) -> None:
+        """Save the negotiated URL and token back to config.
+
+        After discovery, the server may have a different URL or access
+        token than what's stored (IP change, PMS update, cert rotation).
+        """
+        if not self._server:
+            return
+
+        new_url = self._server._baseurl
+        new_token = self._server._token
+
+        if new_url == self._url and new_token == self._token:
+            return
+
+        if new_url != self._url:
+            logger.info("Server URL changed: %s -> %s", self._url, new_url)
+            self._url = new_url
+        if new_token != self._token:
+            logger.info("Server access token updated for '%s'", self._server_name)
+            self._token = new_token
+
+        try:
+            config = Config.load()
+            server = config.get_server(self.server_config.name)
+            if server:
+                server.url = self._url
+                server.token = self._token
+                config.save()
+        except Exception as e:
+            logger.warning("Failed to persist updated connection: %s", e)
 
     @property
     def account(self) -> MyPlexAccount:
