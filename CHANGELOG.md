@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.2] - 2026-03-05
+
+### Fixed
+- **Plex 401 Unauthorized** - Prefer plex.tv discovery over direct URL+token connection, since account tokens don't work for plex.direct URLs
+- **Stale connection details** - Persist negotiated server URL and access token to config after discovery, keeping direct fallback current across PMS updates and IP changes
+
 ## [0.3.1] - 2026-02-14
 
 ### Fixed
