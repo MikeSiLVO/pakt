@@ -8,6 +8,10 @@ on:
   pull_request:
     paths-ignore:
       - '**/*.md'
+  # Dependencies are declared as open floors, so a breaking release upstream lands
+  # without any commit here. Installing fresh on a schedule is what surfaces it.
+  schedule:
+    - cron: '0 6 * * 1'
   workflow_dispatch:
 
 jobs:
@@ -15,10 +19,10 @@ jobs:
     if: github.repository == 'MikeSiLVO/pakt'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
