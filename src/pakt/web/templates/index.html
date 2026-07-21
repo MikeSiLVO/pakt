@@ -1565,9 +1565,14 @@
         }
 
         function escapeHtml(text) {
-            const div = document.createElement('div');
-            div.textContent = text;
-            return div.innerHTML;
+            // textContent alone leaves both quote characters intact, which breaks
+            // any attribute this lands in (server names can contain them).
+            return String(text ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
         }
 
         // Dashboard functions
@@ -1633,14 +1638,13 @@
         async function pollSyncStatus() {
             const poll = async () => {
                 try {
-                const resp = await fetch('/api/sync/status?_=' + Date.now());
+                const resp = await fetch('/api/sync/status?since=' + lastServerLogIndex + '&_=' + Date.now());
                 const data = await resp.json();
-                console.log('Poll:', data.logs?.length, 'logs, running:', data.running);
 
-                // Update logs from server
-                if (data.logs && data.logs.length > lastServerLogIndex) {
-                    const newLogs = data.logs.slice(lastServerLogIndex);
-                    lastServerLogIndex = data.logs.length;
+                // Server already sliced from lastServerLogIndex, so these are all new
+                if (data.logs && data.logs.length) {
+                    const newLogs = data.logs;
+                    lastServerLogIndex = data.log_count ?? (lastServerLogIndex + newLogs.length);
                     newLogs.forEach(log => {
                         if (log.startsWith('PROGRESS:')) {
                             // Format: PROGRESS:phase:percent:label
@@ -1847,16 +1851,27 @@
                         </div>
                         <div style="display: flex; gap: 0.5rem;">
                             <button class="btn-secondary" style="padding: 0.25rem 0.5rem; font-size: 0.8rem;"
-                                onclick="toggleServer('${escapeHtml(server.name)}', ${!server.enabled})">
+                                data-action="toggle" data-server="${escapeHtml(server.name)}" data-enabled="${!server.enabled}">
                                 ${server.enabled ? 'Disable' : 'Enable'}
                             </button>
                             <button class="btn-secondary" style="padding: 0.25rem 0.5rem; font-size: 0.8rem; color: var(--error);"
-                                onclick="removeServer('${escapeHtml(server.name)}')">
+                                data-action="remove" data-server="${escapeHtml(server.name)}">
                                 Remove
                             </button>
                         </div>
                     </div>`;
                 }).join('');
+
+                // Wired here rather than via onclick: escapeHtml leaves quotes alone,
+                // so a name like "Mike's NAS" would break an inline handler.
+                container.querySelectorAll('button[data-action]').forEach(btn => {
+                    const name = btn.dataset.server;
+                    if (btn.dataset.action === 'toggle') {
+                        btn.addEventListener('click', () => toggleServer(name, btn.dataset.enabled === 'true'));
+                    } else {
+                        btn.addEventListener('click', () => removeServer(name));
+                    }
+                });
             } catch (e) {
                 container.innerHTML = '<span style="color: var(--error);">Error loading servers</span>';
             }

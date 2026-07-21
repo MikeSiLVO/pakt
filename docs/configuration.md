@@ -7,6 +7,10 @@ Complete reference for Pakt's `config.json` settings. See also the main [README]
 - **Windows:** `%APPDATA%\pakt\config.json`
 - **Linux/macOS:** `~/.config/pakt/config.json`
 
+This file holds your Trakt and Plex tokens. On Linux and macOS it is written with `0600` permissions
+(owner read/write only). Saves go to a temporary file that then replaces the original, so an
+interrupted write cannot leave a truncated config behind.
+
 ## Full Example
 
 ```json
@@ -27,7 +31,7 @@ Complete reference for Pakt's `config.json` settings. See also the main [README]
   },
   "scheduler": {
     "enabled": false,
-    "interval_hours": 0,
+    "interval_hours": 0
   },
   "plex_token": "your-plex-account-token",
   "servers": [
@@ -96,7 +100,7 @@ Automatic sync scheduling. Only active while `pakt serve` is running.
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable automatic scheduled syncs |
-| `interval_hours` | integer | `0` | Hours between syncs (0 = disabled) |
+| `interval_hours` | integer | `0` | Hours between syncs (0 = disabled). The web UI requires at least 1. |
 
 ---
 
@@ -204,3 +208,7 @@ To access the web UI from other devices:
 ```
 
 Then access via your machine's IP address.
+
+The web UI has no login. Anyone who can reach the port can change settings, remove servers, revoke
+your Trakt token, or stop the server. Only bind `0.0.0.0` on a network you trust, or put it behind a
+reverse proxy that handles authentication.

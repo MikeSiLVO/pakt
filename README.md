@@ -207,6 +207,9 @@ Default port is 7258 (PAKT on phone keypad). To change, edit `config.json`:
 
 Or use CLI flags: `pakt serve --host 0.0.0.0 --port 9000`
 
+The web UI has no login, so binding to `0.0.0.0` gives anyone on your network full control. Keep the
+default `127.0.0.1` unless you trust the network or sit it behind an authenticating reverse proxy.
+
 ## Trakt Account Limits
 
 Free Trakt accounts have a 100-item limit on collections and watchlists. Pakt will warn you if you hit these limits. Upgrade to [Trakt VIP](https://trakt.tv/vip) for unlimited.

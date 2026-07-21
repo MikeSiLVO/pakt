@@ -17,6 +17,10 @@ docker-compose up -d
 
 Web UI available at http://localhost:7258
 
+The image installs the released `pakt` package from PyPI rather than building the checked-out
+source, so the clone only supplies `docker-compose.yml` and the `Dockerfile`. Rebuilding picks up
+the latest published version.
+
 ---
 
 ## First-Time Setup

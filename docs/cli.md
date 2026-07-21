@@ -237,6 +237,7 @@ pakt serve --no-tray          # Explicitly disable tray
 - Default port 7258 = "PAKT" on phone keypad
 - Port/host can be configured in `config.json` under `web`
 - Use `--tray` with `pythonw` for background mode on Windows
+- While a sync is running, `Ctrl+C` cancels the sync and leaves the server up. Press it again to stop the server.
 
 ---
 

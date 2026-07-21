@@ -58,6 +58,22 @@ pakt setup
 
 ---
 
+### Settings reset to defaults / "Could not read config.json"
+
+**Cause:** `config.json` could not be parsed, usually a partial write from a machine losing power mid-save.
+
+**What Pakt does:** the unreadable file is renamed to `config.json.corrupt` and defaults are used for that run, so the bad copy is never overwritten by a later save.
+
+**Solution:**
+
+Open `config.json.corrupt`, salvage anything you need (your `servers` list is the painful part to rebuild), then re-authenticate:
+```bash
+pakt login
+pakt setup
+```
+
+---
+
 ### "Token refresh failed"
 
 **Cause:** Trakt refresh token expired or revoked.
@@ -226,7 +242,7 @@ Options:
 **Possible causes:**
 1. Scheduler not enabled
 2. `pakt serve` not running
-3. Interval set to 0
+3. Interval set to 0 (the web UI rejects anything below 1 hour)
 
 **Solutions:**
 

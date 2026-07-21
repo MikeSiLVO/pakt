@@ -51,6 +51,7 @@ class SyncScheduler:
 
         self._add_job()
         self.scheduler.start()
+        self._refresh_next_run()
         logger.info(
             f"Scheduler started with {self.config.scheduler.interval_hours}h interval"
         )
@@ -74,11 +75,23 @@ class SyncScheduler:
                 id=self._job_id,
                 name="Pakt Sync",
                 replace_existing=True,
+                # A sync can block well past APScheduler's 1s default grace,
+                # which would silently drop that run until the next interval.
+                misfire_grace_time=None,
+                coalesce=True,
+                max_instances=1,
             )
 
+        self._refresh_next_run()
+
+    def _refresh_next_run(self) -> None:
+        """Cache the next fire time.
+
+        A job queued before the scheduler starts is pending and carries no
+        next_run_time at all, so this has to tolerate the attribute being absent.
+        """
         job = self.scheduler.get_job(self._job_id)
-        if job:
-            self._next_run = job.next_run_time
+        self._next_run = getattr(job, "next_run_time", None)
 
     async def _run_sync(self) -> None:
         """Execute the sync if not already running."""
@@ -94,9 +107,7 @@ class SyncScheduler:
         except Exception as e:
             logger.error(f"Scheduled sync failed: {e}")
         finally:
-            job = self.scheduler.get_job(self._job_id)
-            if job:
-                self._next_run = job.next_run_time
+            self._refresh_next_run()
 
     def update_config(self, enabled: bool, interval_hours: int) -> None:
         """Update scheduler configuration.
@@ -116,6 +127,11 @@ class SyncScheduler:
             return
 
         if interval_hours <= 0:
+            # Leaving the job in place would keep firing on the old interval
+            # while config and UI both report it as off.
+            if self.scheduler.get_job(self._job_id):
+                self.scheduler.remove_job(self._job_id)
+                self._next_run = None
             logger.warning("Invalid interval, scheduler disabled")
             return
 
@@ -125,13 +141,14 @@ class SyncScheduler:
         else:
             self._add_job()
 
+        self._refresh_next_run()
         logger.info(f"Scheduler updated: {interval_hours}h interval")
 
     @property
     def next_run(self) -> datetime | None:
         """Get the next scheduled run time."""
         job = self.scheduler.get_job(self._job_id)
-        return job.next_run_time if job else None
+        return getattr(job, "next_run_time", None)
 
     @property
     def last_run(self) -> datetime | None:

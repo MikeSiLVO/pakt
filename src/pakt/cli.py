@@ -27,10 +27,8 @@ def main():
 def _make_token_refresh_callback(config: Config):
     """Create a callback that saves tokens when they're refreshed."""
     def on_token_refresh(token: dict):
-        config.trakt.access_token = token["access_token"]
-        config.trakt.refresh_token = token["refresh_token"]
-        config.trakt.expires_at = token["created_at"] + token["expires_in"]
-        config.save()
+        """Persist rotated Trakt tokens; refresh tokens are single-use so losing one forces a re-login."""
+        config.save_trakt_token(token)
     return on_token_refresh
 
 
@@ -38,11 +36,13 @@ def _make_token_refresh_callback(config: Config):
 @click.option("--dry-run", is_flag=True, help="Show what would be synced without making changes")
 @click.option("--verbose", "-v", is_flag=True, help="Show detailed list of items to sync")
 @click.option("--server", "-s", "servers", multiple=True, help="Sync specific server(s) only (can specify multiple)")
-@click.option("--fix-collection-dates", is_flag=True, help="Re-send all collection items to Trakt with correct dates from Plex")
+@click.option("--fix-collection-dates", is_flag=True,
+              help="Re-send all collection items to Trakt with correct dates from Plex")
 @click.option("--collection-only", is_flag=True, help="Only sync collection (skip watched, ratings, watchlist)")
 @click.option("--no-movies", is_flag=True, help="Skip movie sync")
 @click.option("--no-shows", is_flag=True, help="Skip show/episode sync")
-def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_dates: bool, collection_only: bool, no_movies: bool, no_shows: bool):
+def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_dates: bool,
+         collection_only: bool, no_movies: bool, no_shows: bool):
     """Sync watched status and ratings between Plex and Trakt."""
     from pakt.sync import run_multi_server_sync
 
@@ -89,6 +89,7 @@ def login():
     config = Config.load()
 
     async def do_auth():
+        """Run the Trakt device flow and store the resulting tokens."""
         async with TraktClient(config.trakt) as client:
             console.print("[cyan]Getting device code...[/]")
             device = await client.device_code()
@@ -126,6 +127,7 @@ def logout():
         return
 
     async def do_logout():
+        """Revoke the token on Trakt, then clear it locally either way."""
         async with TraktClient(config.trakt) as client:
             console.print("[cyan]Revoking Trakt access token...[/]")
             success = await client.revoke_token()
@@ -176,6 +178,7 @@ def setup(token: bool):
         console.print("[bold]Step 1: Trakt Authentication[/]\n")
 
         async def do_auth():
+            """Run the Trakt device flow during the setup wizard."""
             async with TraktClient(config.trakt) as client:
                 console.print("[cyan]Getting device code...[/]")
                 device = await client.device_code()
@@ -426,7 +429,6 @@ def status():
 def serve(host: str | None, port: int | None, tray: bool | None):
     """Start the web interface."""
     import os
-    import signal
 
     import uvicorn
 
@@ -459,7 +461,7 @@ def serve(host: str | None, port: int | None, tray: bool | None):
     # Debug logging for pythonw troubleshooting
     debug_log = None
     def log(msg: str) -> None:
-        pass
+        """No-op stand-in used when debug logging is off."""
 
     if silent_mode:
         try:
@@ -480,6 +482,7 @@ def serve(host: str | None, port: int | None, tray: bool | None):
                 debug_log = open(log_path, "w")
 
             def log(msg: str) -> None:
+                """Write to the debug file; pythonw has no console to fall back on."""
                 if debug_log:
                     debug_log.write(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
                     debug_log.flush()
@@ -492,7 +495,7 @@ def serve(host: str | None, port: int | None, tray: bool | None):
             pass
 
     # Redirect stdout/stderr to devnull in silent mode (for pythonw)
-    # Kept open for process lifetime — intentionally not closed
+    # Kept open for process lifetime, intentionally not closed
     _devnull = None
     if silent_mode:
         try:
@@ -515,12 +518,30 @@ def serve(host: str | None, port: int | None, tray: bool | None):
                 web_url = f"http://{host}:{port}"
 
                 def on_exit():
+                    """Hard exit from the tray menu; uvicorn is on another thread."""
                     log("Exit requested from tray")
                     os._exit(0)
 
+                def trigger_sync():
+                    """Start a sync over the local API, since the tray runs off the event loop."""
+                    import httpx
+
+                    try:
+                        httpx.post(f"{web_url}/api/sync", json={}, timeout=10.0)
+                    except Exception as e:
+                        log(f"Tray sync request failed: {e}")
+
+                def get_scheduler():
+                    """Look up the scheduler, which the web app creates after the tray starts."""
+                    from pakt.web import app as web_app
+
+                    return web_app._scheduler
+
                 tray_instance = PaktTray(
                     web_url=web_url,
+                    sync_callback=trigger_sync,
                     shutdown_callback=on_exit,
+                    scheduler_getter=get_scheduler,
                 )
                 if not port_in_use:
                     log("Starting tray")
@@ -571,22 +592,23 @@ def serve(host: str | None, port: int | None, tray: bool | None):
     log("Creating app")
     app = create_app()
 
-    # Handle Ctrl+C gracefully - cancel sync if running
-    def handle_sigint(signum, frame):
-        log("SIGINT received")
-        if sync_state["running"]:
-            if not silent_mode:
-                console.print("\n[yellow]Cancelling sync...[/]")
-            sync_state["cancelled"] = True
-        else:
+    class PaktServer(uvicorn.Server):
+        """Server whose first Ctrl+C cancels a running sync rather than cutting it mid-write.
+
+        uvicorn installs its own SIGINT handler inside serve(), so overriding this
+        is the only way to get a look at the signal.
+        """
+
+        def handle_exit(self, sig, frame) -> None:
+            """Cancel a running sync on the first signal, shut down on the next."""
+            if sync_state["running"] and not sync_state["cancelled"]:
+                sync_state["cancelled"] = True
+                if not silent_mode:
+                    console.print("\n[yellow]Cancelling sync... (Ctrl+C again to quit)[/]")
+                return
             if not silent_mode:
                 console.print("\n[dim]Shutting down...[/]")
-            raise KeyboardInterrupt
-
-    try:
-        signal.signal(signal.SIGINT, handle_sigint)
-    except Exception:
-        pass  # Signal handling may not work with pythonw
+            super().handle_exit(sig, frame)
 
     try:
         log(f"Starting uvicorn on {host}:{port}")
@@ -594,7 +616,7 @@ def serve(host: str | None, port: int | None, tray: bool | None):
 
         # Use uvicorn.Config + Server for better control in pythonw environment
         uvi_config = uvicorn.Config(app, host=host, port=port, log_level=uvi_log_level)
-        server = uvicorn.Server(uvi_config)
+        server = PaktServer(uvi_config)
 
         # Notify on successful start
         if tray_instance and tray_instance._icon:

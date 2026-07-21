@@ -184,6 +184,6 @@ Alternatively, use Pakt's built-in scheduler via the web UI:
 1. Run `pakt serve` (or as a background service)
 2. Open http://localhost:7258
 3. Go to Settings → Scheduled Sync
-4. Set interval in hours and enable
+4. Set interval in hours (minimum 1) and enable
 
 The built-in scheduler only runs while the web server is running.

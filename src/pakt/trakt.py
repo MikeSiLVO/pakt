@@ -12,7 +12,7 @@ import httpx
 from rich.console import Console
 
 from pakt.config import TraktConfig
-from pakt.models import RatedItem, TraktIds, WatchedItem
+from pakt.models import RatedItem, WatchedItem
 
 console = Console()
 
@@ -27,6 +27,7 @@ class TraktRateLimitError(Exception):
     """Raised when rate limited."""
 
     def __init__(self, retry_after: int):
+        """Carry the server's Retry-After so callers can wait the right amount."""
         self.retry_after = retry_after
         super().__init__(f"Rate limited, retry after {retry_after}s")
 
@@ -35,6 +36,7 @@ class TraktAccountLimitError(Exception):
     """Raised when account limit exceeded (HTTP 420)."""
 
     def __init__(self, limit: int, is_vip: bool, upgrade_url: str = "https://trakt.tv/vip"):
+        """Carry the limit and upgrade URL Trakt returned so the message can point at a fix."""
         self.limit = limit
         self.is_vip = is_vip
         self.upgrade_url = upgrade_url
@@ -48,6 +50,7 @@ class TraktAuthError(Exception):
     """Raised when authentication fails (invalid/expired tokens)."""
 
     def __init__(self, message: str = "Authentication failed. Run 'pakt login' to re-authenticate."):
+        """Default to the message that tells the user how to recover."""
         super().__init__(message)
 
 
@@ -88,21 +91,23 @@ class TraktClient:
         config: TraktConfig,
         on_token_refresh: Callable[[dict[str, Any]], None] | None = None,
     ):
+        """``on_token_refresh`` fires with the new token so the caller can persist it."""
         self.config = config
         self._client: httpx.AsyncClient | None = None
         self._on_token_refresh = on_token_refresh
 
     async def __aenter__(self) -> TraktClient:
+        """Open the HTTP client and refresh the token if it is close to expiring."""
         self._client = httpx.AsyncClient(
             base_url=TRAKT_API_URL,
             timeout=60.0,
             headers=self._headers,
         )
-        # Check if token needs refresh on entry
         await self._ensure_valid_token()
         return self
 
     async def __aexit__(self, *args) -> None:
+        """Close the HTTP client."""
         if self._client:
             await self._client.aclose()
 
@@ -146,6 +151,7 @@ class TraktClient:
 
     @property
     def _headers(self) -> dict[str, str]:
+        """Base headers for every API call, with the bearer token when logged in."""
         headers = {
             "Content-Type": "application/json",
             "trakt-api-version": "2",
@@ -172,6 +178,8 @@ class TraktClient:
 
                 if response.status_code == 429:
                     retry_after = int(response.headers.get("Retry-After", 60))
+                    if attempt == retries - 1:
+                        raise TraktRateLimitError(retry_after)
                     console.print(
                         f"[yellow]Rate limited, waiting {retry_after}s "
                         f"(attempt {attempt + 1}/{retries})[/]"
@@ -196,30 +204,66 @@ class TraktClient:
             except httpx.HTTPStatusError as e:
                 if attempt < retries - 1:
                     status = e.response.status_code
-                    if status == 429:
-                        continue
                     if status in (502, 503, 504):
                         wait = 2 ** attempt
-                        console.print(f"[yellow]Trakt {status}, retrying in {wait}s (attempt {attempt + 1}/{retries})[/]")
+                        console.print(
+                            f"[yellow]Trakt {status}, retrying in {wait}s (attempt {attempt + 1}/{retries})[/]"
+                        )
                         await asyncio.sleep(wait)
                         continue
                 raise
 
+            except httpx.TransportError as e:
+                # Timeouts and dropped connections; pagination makes these routine
+                if attempt < retries - 1:
+                    wait = 2 ** attempt
+                    console.print(
+                        f"[yellow]Trakt connection error ({type(e).__name__}), retrying in {wait}s "
+                        f"(attempt {attempt + 1}/{retries})[/]"
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise
+
         raise TraktRateLimitError(60)
 
-    # =========================================================================
-    # BATCH READ OPERATIONS - Single call gets everything
-    # =========================================================================
+    async def _paginated_get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        limit: int = 100,
+    ) -> list[dict[str, Any]]:
+        """Walk every page of a Trakt endpoint and return the items joined together.
+
+        Trakt caps the requested limit, so the loop follows the page count it
+        reports back rather than assuming the requested size was honoured.
+        """
+        params = dict(params or {})
+        params["limit"] = limit
+        params["page"] = 1
+
+        response = await self._request("GET", path, params=params)
+        items: list[dict[str, Any]] = response.json()
+
+        page_count = int(response.headers.get("X-Pagination-Page-Count") or 1)
+        for page in range(2, page_count + 1):
+            params["page"] = page
+            page_response = await self._request("GET", path, params=params)
+            items.extend(page_response.json())
+
+        return items
 
     async def get_watched_movies(self) -> list[WatchedItem]:
-        """Get ALL watched movies in a single API call."""
-        response = await self._request("GET", "/sync/watched/movies")
-        return [WatchedItem(**item) for item in response.json()]
+        """Get all watched movies. Trakt paginates this endpoint at 250 items max."""
+        items = await self._paginated_get("/sync/watched/movies", limit=250)
+        return [WatchedItem(**item) for item in items]
 
     async def get_watched_shows(self) -> list[WatchedItem]:
-        """Get ALL watched shows in a single API call."""
-        response = await self._request("GET", "/sync/watched/shows")
-        return [WatchedItem(**item) for item in response.json()]
+        """Get all watched shows. ``extended=progress`` carries the per-season episode data, capped at 100/page."""
+        items = await self._paginated_get(
+            "/sync/watched/shows", params={"extended": "progress"}, limit=100
+        )
+        return [WatchedItem(**item) for item in items]
 
     async def get_movie_ratings(self) -> list[RatedItem]:
         """Get ALL movie ratings in a single API call."""
@@ -279,10 +323,6 @@ class TraktClient:
             list_limit=limits.get("list", {}).get("count", 2),
             list_item_limit=limits.get("list", {}).get("item_count", 100),
         )
-
-    # =========================================================================
-    # BATCH WRITE OPERATIONS - Single call updates everything
-    # =========================================================================
 
     async def add_to_history(
         self,
@@ -440,10 +480,6 @@ class TraktClient:
         response = await self._request("POST", "/sync/watchlist/remove", json=payload)
         return response.json()
 
-    # =========================================================================
-    # SEARCH - For ID lookups (cached heavily)
-    # =========================================================================
-
     async def search_by_id(
         self,
         id_type: str,
@@ -457,10 +493,6 @@ class TraktClient:
 
         response = await self._request("GET", f"/search/{id_type}/{media_id}", params=params)
         return response.json()
-
-    # =========================================================================
-    # AUTHENTICATION
-    # =========================================================================
 
     async def device_code(self) -> dict[str, Any]:
         """Start device authentication flow."""
@@ -610,15 +642,3 @@ class TraktClient:
                 headers={"Content-Type": "application/json"},
             )
             return response.status_code == 200
-
-
-def extract_trakt_ids(data: dict[str, Any]) -> TraktIds:
-    """Extract Trakt IDs from API response."""
-    ids = data.get("ids", {})
-    return TraktIds(
-        trakt=ids.get("trakt"),
-        slug=ids.get("slug"),
-        imdb=ids.get("imdb"),
-        tmdb=ids.get("tmdb"),
-        tvdb=ids.get("tvdb"),
-    )

@@ -39,6 +39,20 @@ class TraktCache:
 
 
 @dataclass
+class PushedToTrakt:
+    """Items already sent to Trakt this run.
+
+    The shared TraktCache is fetched once and never refreshed, so without this a
+    second server would still see an item as missing and post it again.
+    """
+
+    watched_movies: set[str] = field(default_factory=set)
+    rated_movies: set[str] = field(default_factory=set)
+    watched_episodes: set[tuple] = field(default_factory=set)
+    rated_episodes: set[tuple] = field(default_factory=set)
+
+
+@dataclass
 class MovieProcessingResult:
     """Results from movie processing (runs in thread)."""
 
@@ -74,6 +88,8 @@ def _process_episodes_in_thread(
     sync_ratings_trakt_to_plex: bool,
     rating_priority: str,
     cancel_event: threading.Event,
+    pushed: PushedToTrakt,
+    dry_run: bool,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> EpisodeProcessingResult:
     """Process episodes in a thread to not block the event loop.
@@ -103,6 +119,8 @@ def _process_episodes_in_thread(
             ep.viewCount > 0 if ep.viewCount else False,  # isWatched
             ep.userRating,
             ep.grandparentTitle,
+            _plex_dt_to_utc_iso(ep.lastViewedAt),
+            _plex_dt_to_utc_iso(ep.lastRatedAt),
             ep,  # Keep reference for Plex operations
         ))
 
@@ -110,17 +128,21 @@ def _process_episodes_in_thread(
         progress_callback(total, total)
 
     # Now iterate over extracted data (pure Python, no network calls)
-    for show_key, season_num, ep_num, plex_watched, plex_ep_rating, show_title, episode in episode_data:
+    for (show_key, season_num, ep_num, plex_watched, plex_ep_rating, show_title,
+         plex_watched_at, plex_rated_at, episode) in episode_data:
         show_ids = plex_show_ids_by_key.get(show_key)
         if not show_ids or (not show_ids.tvdb and not show_ids.imdb):
             result.skipped_no_ids += 1
             continue
 
-        # Skip duplicates (same episode in multiple libraries)
+        # Same episode in several libraries: Trakt needs it once, but each Plex
+        # copy still needs its own write or the other copies stay unwatched.
         ep_key = (show_ids.tvdb or show_ids.imdb, season_num, ep_num)
-        if ep_key in processed_episode_ids:
-            continue
+        duplicate = ep_key in processed_episode_ids
         processed_episode_ids.add(ep_key)
+
+        skip_watched_push = duplicate or ep_key in pushed.watched_episodes
+        skip_rating_push = duplicate or ep_key in pushed.rated_episodes
 
         # Check watched status
         trakt_watched = False
@@ -129,20 +151,25 @@ def _process_episodes_in_thread(
         elif show_ids.imdb and (show_ids.imdb, season_num, ep_num) in trakt_watched_episodes:
             trakt_watched = True
 
-        if plex_watched and not trakt_watched and sync_watched_plex_to_trakt:
+        if plex_watched and not trakt_watched and not skip_watched_push and sync_watched_plex_to_trakt:
             ep_ids = {}
             if show_ids.tvdb:
                 ep_ids["tvdb"] = show_ids.tvdb
             if show_ids.imdb:
                 ep_ids["imdb"] = show_ids.imdb
             if ep_ids:
+                episode_entry: dict[str, Any] = {"number": ep_num}
+                if plex_watched_at:
+                    episode_entry["watched_at"] = plex_watched_at
                 result.episodes_to_mark_watched_trakt.append({
                     "ids": ep_ids,
-                    "seasons": [{"number": season_num, "episodes": [{"number": ep_num}]}]
+                    "seasons": [{"number": season_num, "episodes": [episode_entry]}]
                 })
                 result.episodes_to_mark_watched_trakt_display.append(
                     f"{show_title} S{season_num:02d}E{ep_num:02d}"
                 )
+                if not dry_run:
+                    pushed.watched_episodes.add(ep_key)
         elif trakt_watched and not plex_watched and sync_watched_trakt_to_plex:
             result.episodes_to_mark_watched_plex.append(episode)
 
@@ -159,12 +186,13 @@ def _process_episodes_in_thread(
         # Determine if rating should sync to Trakt
         sync_rating_to_trakt = False
         sync_rating_to_plex = False
-        if plex_ep_rating_int and not trakt_ep_rating_val and sync_ratings_plex_to_trakt:
+        if (plex_ep_rating_int and not trakt_ep_rating_val and not skip_rating_push
+                and sync_ratings_plex_to_trakt):
             sync_rating_to_trakt = True
         elif trakt_ep_rating_val and not plex_ep_rating_int and sync_ratings_trakt_to_plex:
             sync_rating_to_plex = True
         elif plex_ep_rating_int and trakt_ep_rating_val and plex_ep_rating_int != trakt_ep_rating_val:
-            if rating_priority == "plex" and sync_ratings_plex_to_trakt:
+            if rating_priority == "plex" and not skip_rating_push and sync_ratings_plex_to_trakt:
                 sync_rating_to_trakt = True
             elif rating_priority == "trakt" and sync_ratings_trakt_to_plex:
                 sync_rating_to_plex = True
@@ -176,17 +204,19 @@ def _process_episodes_in_thread(
             if show_ids.imdb:
                 ep_ids["imdb"] = show_ids.imdb
             if ep_ids:
+                rating_entry: dict[str, Any] = {"number": ep_num, "rating": plex_ep_rating_int}
+                if plex_rated_at:
+                    rating_entry["rated_at"] = plex_rated_at
                 result.episodes_to_rate_trakt.append({
                     "ids": ep_ids,
-                    "seasons": [{
-                        "number": season_num,
-                        "episodes": [{"number": ep_num, "rating": plex_ep_rating_int}]
-                    }]
+                    "seasons": [{"number": season_num, "episodes": [rating_entry]}]
                 })
                 result.episodes_to_rate_trakt_display.append(
                     f"{show_title} S{season_num:02d}E{ep_num:02d} = {plex_ep_rating_int}"
                 )
-        elif sync_rating_to_plex:
+                if not dry_run:
+                    pushed.rated_episodes.add(ep_key)
+        elif sync_rating_to_plex and trakt_ep_rating_val is not None:
             result.episodes_to_rate_plex.append((episode, trakt_ep_rating_val))
 
     return result
@@ -220,6 +250,20 @@ def get_file_logger() -> logging.Logger:
     return _file_logger
 
 
+def _is_watched_episode(ep_data: dict) -> bool:
+    """Whether a Trakt episode entry is actually watched.
+
+    ``extended=progress`` can list every episode of a show with a ``completed``
+    flag, so presence in the response is not proof of a play.
+    """
+    completed = ep_data.get("completed")
+    if completed is False:
+        return False
+    if completed is None:
+        return bool(ep_data.get("last_watched_at") or ep_data.get("plays"))
+    return True
+
+
 def _plex_dt_to_utc_iso(dt: datetime | None) -> str | None:
     """Convert a naive local datetime from PlexAPI to UTC ISO 8601 for Trakt.
 
@@ -246,7 +290,9 @@ class SyncEngine:
         server_name: str | None = None,
         server_config: ServerConfig | None = None,
         trakt_cache: TraktCache | None = None,
+        pushed: PushedToTrakt | None = None,
     ):
+        """``trakt_cache`` is shared across servers so a multi-server run fetches Trakt once."""
         self.config = config
         self.trakt = trakt
         self.plex = plex
@@ -256,6 +302,7 @@ class SyncEngine:
         self._server_name = server_name
         self._server_config = server_config
         self._trakt_cache = trakt_cache
+        self._pushed = pushed or PushedToTrakt()
         self._account_limits: AccountLimits | None = None
         self._fix_collection_dates = False
 
@@ -388,6 +435,7 @@ class SyncEngine:
         movies_to_rate_trakt: list[dict] = []
         movies_to_rate_plex: list[tuple[Any, int]] = []
         processed_movie_ids: set[str] = set()
+        pushed = self._pushed
 
         total_movies = len(plex_movies)
         self._log(f"  Processing {total_movies} movies...")
@@ -422,13 +470,16 @@ class SyncEngine:
 
                     plex_ids = extract_plex_ids(plex_movie)
 
-                    # Skip duplicates (same movie in multiple libraries)
+                    # Same movie in several libraries: Trakt needs it once, but each Plex
+                    # copy still needs its own write or the other copies stay unwatched.
                     movie_key = plex_ids.imdb or (f"tmdb:{plex_ids.tmdb}" if plex_ids.tmdb else None)
+                    duplicate = False
                     if movie_key:
-                        if movie_key in processed_movie_ids:
-                            processed += 1
-                            continue
+                        duplicate = movie_key in processed_movie_ids
                         processed_movie_ids.add(movie_key)
+
+                    skip_watched_push = duplicate or (movie_key in pushed.watched_movies)
+                    skip_rating_push = duplicate or (movie_key in pushed.rated_movies)
 
                     trakt_data = None
                     if plex_ids.imdb and plex_ids.imdb in trakt_watched_by_imdb:
@@ -445,31 +496,48 @@ class SyncEngine:
                     plex_watched = plex_movie.isWatched
                     trakt_watched = trakt_data is not None
 
-                    if plex_watched and not trakt_watched and self._get_sync_option("watched_plex_to_trakt"):
+                    if (plex_watched and not trakt_watched and not skip_watched_push
+                            and self._get_sync_option("watched_plex_to_trakt")):
                         movie_data = self._build_trakt_movie(plex_movie, plex_ids)
                         if movie_data:
+                            watched_at = _plex_dt_to_utc_iso(plex_movie.lastViewedAt)
+                            if watched_at:
+                                movie_data["watched_at"] = watched_at
                             movies_to_mark_watched_trakt.append(movie_data)
+                            if not dry_run and movie_key:
+                                pushed.watched_movies.add(movie_key)
                     elif trakt_watched and not plex_watched and self._get_sync_option("watched_trakt_to_plex"):
                         movies_to_mark_watched_plex.append(plex_movie)
 
                     plex_rating = int(plex_movie.userRating) if plex_movie.userRating else None
                     trakt_rating_val = trakt_rating["rating"] if trakt_rating else None
 
-                    if plex_rating and not trakt_rating_val and self._get_sync_option("ratings_plex_to_trakt"):
+                    if (plex_rating and not trakt_rating_val and not skip_rating_push
+                            and self._get_sync_option("ratings_plex_to_trakt")):
                         movie_data = self._build_trakt_movie(plex_movie, plex_ids)
                         if movie_data:
                             movie_data["rating"] = plex_rating
+                            rated_at = _plex_dt_to_utc_iso(plex_movie.lastRatedAt)
+                            if rated_at:
+                                movie_data["rated_at"] = rated_at
                             movies_to_rate_trakt.append(movie_data)
+                            if not dry_run and movie_key:
+                                pushed.rated_movies.add(movie_key)
                     elif trakt_rating_val and not plex_rating and self._get_sync_option("ratings_trakt_to_plex"):
                         movies_to_rate_plex.append((plex_movie, trakt_rating_val))
                     elif plex_rating and trakt_rating_val and plex_rating != trakt_rating_val:
-                        # Both sides have different ratings — use priority setting
                         priority = self.config.sync.rating_priority
-                        if priority == "plex" and self._get_sync_option("ratings_plex_to_trakt"):
+                        if (priority == "plex" and not skip_rating_push
+                                and self._get_sync_option("ratings_plex_to_trakt")):
                             movie_data = self._build_trakt_movie(plex_movie, plex_ids)
                             if movie_data:
                                 movie_data["rating"] = plex_rating
+                                rated_at = _plex_dt_to_utc_iso(plex_movie.lastRatedAt)
+                                if rated_at:
+                                    movie_data["rated_at"] = rated_at
                                 movies_to_rate_trakt.append(movie_data)
+                                if not dry_run and movie_key:
+                                    pushed.rated_movies.add(movie_key)
                         elif priority == "trakt" and self._get_sync_option("ratings_trakt_to_plex"):
                             movies_to_rate_plex.append((plex_movie, trakt_rating_val))
 
@@ -508,12 +576,12 @@ class SyncEngine:
 
             if movies_to_mark_watched_plex:
                 self._log(f"  Marking {len(movies_to_mark_watched_plex)} movies watched on Plex...")
-                failed = self.plex.mark_watched_batch(movies_to_mark_watched_plex)
+                failed = await asyncio.to_thread(self.plex.mark_watched_batch, movies_to_mark_watched_plex)
                 result.added_to_plex += len(movies_to_mark_watched_plex) - len(failed)
 
             if movies_to_rate_plex:
                 self._log(f"  Rating {len(movies_to_rate_plex)} movies on Plex...")
-                failed = self.plex.rate_batch(movies_to_rate_plex)
+                failed = await asyncio.to_thread(self.plex.rate_batch, movies_to_rate_plex)
                 result.ratings_synced += len(movies_to_rate_plex) - len(failed)
 
         self._progress(1, 4, 100, "Movies complete")
@@ -586,6 +654,7 @@ class SyncEngine:
         gc.collect()
 
         trakt_watched_episodes: dict[tuple, dict] = {}
+        n_trakt_shows = len(trakt_watched_shows)
         for show_item in trakt_watched_shows:
             if not show_item.show:
                 continue
@@ -595,6 +664,8 @@ class SyncEngine:
             for season_data in show_item.seasons or []:
                 season_num = season_data.get("number", 0)
                 for ep_data in season_data.get("episodes", []):
+                    if not _is_watched_episode(ep_data):
+                        continue
                     ep_num = ep_data.get("number", 0)
                     data = {"show": show_item.show, "last_watched_at": ep_data.get("last_watched_at")}
                     if tvdb_id:
@@ -603,6 +674,15 @@ class SyncEngine:
                         trakt_watched_episodes[(imdb_id, season_num, ep_num)] = data
         del trakt_watched_shows
         gc.collect()
+
+        # An empty index against a non-empty show list means the response shape changed under us.
+        # Syncing on it would mark everything unwatched on one side, so stop instead.
+        if n_trakt_shows and not trakt_watched_episodes:
+            self._log(
+                f"ERROR:Trakt returned {n_trakt_shows} watched shows but no watched episodes. "
+                "Skipping episode sync rather than acting on empty data."
+            )
+            return True
 
         trakt_episode_ratings: dict[tuple, dict] = {}
         for item in trakt_episode_ratings_list:
@@ -631,6 +711,7 @@ class SyncEngine:
         progress_state = {"processed": 0, "total": total_episodes}
 
         def on_progress(processed: int, total: int) -> None:
+            """Called from the worker thread; only touches plain dict entries."""
             progress_state["processed"] = processed
             progress_state["total"] = total
 
@@ -648,6 +729,8 @@ class SyncEngine:
                 self._get_sync_option("ratings_trakt_to_plex"),
                 self.config.sync.rating_priority,
                 cancel_event,
+                self._pushed,
+                dry_run,
                 on_progress,
             )
         )
@@ -731,12 +814,12 @@ class SyncEngine:
 
             if episodes_to_mark_watched_plex:
                 self._log(f"  Marking {len(episodes_to_mark_watched_plex)} episodes watched on Plex...")
-                failed = self.plex.mark_watched_batch(episodes_to_mark_watched_plex)
+                failed = await asyncio.to_thread(self.plex.mark_watched_batch, episodes_to_mark_watched_plex)
                 result.added_to_plex += len(episodes_to_mark_watched_plex) - len(failed)
 
             if episodes_to_rate_plex:
                 self._log(f"  Rating {len(episodes_to_rate_plex)} episodes on Plex...")
-                failed = self.plex.rate_batch(episodes_to_rate_plex)
+                failed = await asyncio.to_thread(self.plex.rate_batch, episodes_to_rate_plex)
                 result.ratings_synced += len(episodes_to_rate_plex) - len(failed)
 
         self._progress(2, 4, 100, "Episodes complete")
@@ -749,7 +832,8 @@ class SyncEngine:
 
         return True
 
-    async def _sync_collection(self, result: SyncResult, dry_run: bool, no_movies: bool = False, no_shows: bool = False) -> bool:
+    async def _sync_collection(self, result: SyncResult, dry_run: bool,
+                               no_movies: bool = False, no_shows: bool = False) -> bool:
         """Sync Plex library to Trakt collection. Returns False if cancelled."""
         if not self._get_sync_option("collection_plex_to_trakt"):
             self._log("\n[dim]Phase 3: Skipped (collection sync disabled)[/]")
@@ -1069,7 +1153,8 @@ class SyncEngine:
                     n_movies = len(movies_to_collect)
                     batch_size = 500
                     n_batches = (n_movies + batch_size - 1) // batch_size
-                    self._log(f"  Sending {n_movies} movies to Trakt collection ({n_batches} batch{'es' if n_batches > 1 else ''})...")
+                    plural = "es" if n_batches > 1 else ""
+                    self._log(f"  Sending {n_movies} movies to Trakt collection ({n_batches} batch{plural})...")
                     for i in range(0, n_movies, batch_size):
                         batch = movies_to_collect[i:i + batch_size]
                         if n_batches > 1:
@@ -1082,7 +1167,11 @@ class SyncEngine:
                     n_shows = len(shows_to_collect)
                     batch_size = 100
                     n_batches = (n_shows + batch_size - 1) // batch_size
-                    self._log(f"  Sending {n_shows} shows ({total_new_episodes} episodes) to Trakt collection ({n_batches} batch{'es' if n_batches > 1 else ''})...")
+                    plural = "es" if n_batches > 1 else ""
+                    self._log(
+                        f"  Sending {n_shows} shows ({total_new_episodes} episodes) "
+                        f"to Trakt collection ({n_batches} batch{plural})..."
+                    )
                     for i in range(0, n_shows, batch_size):
                         batch = shows_to_collect[i:i + batch_size]
                         if n_batches > 1:
@@ -1145,7 +1234,7 @@ class SyncEngine:
         ) as progress:
             task = progress.add_task("Fetching Plex watchlist...", total=None)
             self._progress(4, 4, 5, "Plex watchlist")
-            plex_watchlist = self.plex.get_watchlist()
+            plex_watchlist = await asyncio.to_thread(self.plex.get_watchlist)
             progress.update(task, description=f"Got {len(plex_watchlist)} Plex watchlist items")
 
             if self._trakt_cache:
@@ -1266,7 +1355,7 @@ class SyncEngine:
                 if not on_plex and title:
                     # Search Plex Discover for this movie
                     try:
-                        results = self.plex.search_discover(title, libtype="movie")
+                        results = await asyncio.to_thread(self.plex.search_discover, title, libtype="movie")
                         for match in results[:5]:
                             match_ids = extract_plex_ids(match)
                             if (ids.get("imdb") and match_ids.imdb == ids["imdb"]) or \
@@ -1295,7 +1384,7 @@ class SyncEngine:
                 if not on_plex and title:
                     # Search Plex Discover for this show
                     try:
-                        results = self.plex.search_discover(title, libtype="show")
+                        results = await asyncio.to_thread(self.plex.search_discover, title, libtype="show")
                         for match in results[:5]:
                             match_ids = extract_plex_ids(match)
                             if (ids.get("imdb") and match_ids.imdb == ids["imdb"]) or \
@@ -1337,7 +1426,7 @@ class SyncEngine:
 
             for item in items_to_add_plex:
                 try:
-                    self.plex.add_to_watchlist(item)
+                    await asyncio.to_thread(self.plex.add_to_watchlist, item)
                     result.watchlist_added_plex += 1
                 except Exception as e:
                     self._log(f"  [yellow]Warning: Could not add to Plex watchlist: {e}[/]")
@@ -1448,6 +1537,7 @@ async def run_multi_server_sync(
 ) -> SyncResult:
     """Run sync across multiple Plex servers."""
     def log(msg: str):
+        """Forward a line to the caller's log sink, if it supplied one."""
         if log_callback:
             log_callback(msg)
 
@@ -1471,6 +1561,7 @@ async def run_multi_server_sync(
     total_result = SyncResult()
     start_time = time.time()
     server_count = len(servers_to_sync)
+    pushed = PushedToTrakt()
 
     log(f"[bold]Starting sync across {server_count} server(s)...[/]")
 
@@ -1536,7 +1627,7 @@ async def run_multi_server_sync(
             try:
                 # Create PlexClient from server config
                 plex = PlexClient(server_config)
-                plex.connect()
+                await asyncio.to_thread(plex.connect)
                 log(f"Connected to: {plex.server.friendlyName}")
 
                 # Create SyncEngine with server context and shared cache
@@ -1548,6 +1639,7 @@ async def run_multi_server_sync(
                     server_name=server_config.name,
                     server_config=server_config,
                     trakt_cache=trakt_cache,
+                    pushed=pushed,
                 )
 
                 # Run sync for this server

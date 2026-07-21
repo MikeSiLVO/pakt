@@ -6,12 +6,9 @@ from __future__ import annotations
 import threading
 import webbrowser
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 if TYPE_CHECKING:
-    import pystray
-    from PIL import Image
-
     from pakt.scheduler import SyncScheduler
 
 try:
@@ -48,7 +45,7 @@ class PaktTray:
         web_url: str = "http://localhost:8080",
         sync_callback: Callable[[], None] | None = None,
         shutdown_callback: Callable[[], None] | None = None,
-        scheduler: "SyncScheduler | None" = None,
+        scheduler_getter: Callable[[], "SyncScheduler | None"] | None = None,
     ) -> None:
         """Initialize the system tray.
 
@@ -56,7 +53,7 @@ class PaktTray:
             web_url: URL of the web interface
             sync_callback: Function to trigger sync
             shutdown_callback: Function to shutdown the application
-            scheduler: Scheduler instance for status display
+            scheduler_getter: Looks up the scheduler on demand, since it starts after the tray
         """
         if not TRAY_AVAILABLE:
             raise ImportError("pystray and Pillow are required for system tray support")
@@ -64,8 +61,9 @@ class PaktTray:
         self.web_url = web_url
         self.sync_callback = sync_callback
         self.shutdown_callback = shutdown_callback
-        self.scheduler = scheduler
-        self._icon: pystray.Icon | None = None
+        self.scheduler_getter = scheduler_getter
+        # pystray is an optional import, so it cannot be named in a type expression
+        self._icon: Any = None
         self._thread: threading.Thread | None = None
 
     def _open_web_ui(self) -> None:
@@ -84,26 +82,40 @@ class PaktTray:
         if self.shutdown_callback:
             self.shutdown_callback()
 
+    def _scheduler(self) -> "SyncScheduler | None":
+        """Current scheduler, or None if one was never started."""
+        return self.scheduler_getter() if self.scheduler_getter else None
+
+    def _next_sync_text(self, _item: Any) -> str:
+        """Menu label showing when the next scheduled sync lands."""
+        scheduler = self._scheduler()
+        next_run = scheduler.next_run if scheduler else None
+        return f"Next sync: {next_run:%H:%M}" if next_run else ""
+
+    def _has_next_sync(self, _item: Any) -> bool:
+        """Whether there is a scheduled run worth showing."""
+        scheduler = self._scheduler()
+        return bool(scheduler and scheduler.is_enabled and scheduler.next_run)
+
     def _get_menu(self) -> "pystray.Menu":
-        """Create the context menu."""
-        items = [
+        """Create the context menu.
+
+        Label and visibility are callables because the menu is built once at
+        startup, before the scheduler exists.
+        """
+        return pystray.Menu(
             pystray.MenuItem("Open Web UI", self._open_web_ui, default=True),
             pystray.MenuItem("Sync Now", self._trigger_sync),
             pystray.Menu.SEPARATOR,
-        ]
-
-        # Add next run info if scheduler is available
-        if self.scheduler and self.scheduler.is_enabled:
-            next_run = self.scheduler.next_run
-            if next_run:
-                next_str = next_run.strftime("%H:%M")
-                items.append(
-                    pystray.MenuItem(f"Next sync: {next_str}", None, enabled=False)
-                )
-                items.append(pystray.Menu.SEPARATOR)
-
-        items.append(pystray.MenuItem("Exit", self._exit))
-        return pystray.Menu(*items)
+            # pystray wraps callables for text/visible, but ships no types so they look like bool
+            pystray.MenuItem(
+                self._next_sync_text,
+                None,
+                enabled=False,
+                visible=self._has_next_sync,  # type: ignore[arg-type]
+            ),
+            pystray.MenuItem("Exit", self._exit),
+        )
 
     def start(self) -> None:
         """Start the system tray icon in a background thread."""
@@ -120,6 +132,7 @@ class PaktTray:
         self._icon = icon
 
         def run_icon():
+            """pystray blocks, so it owns this thread."""
             icon.run()
 
         self._thread = threading.Thread(target=run_icon, daemon=True)

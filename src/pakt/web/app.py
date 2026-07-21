@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import BackgroundTasks, FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from pakt import __version__
 from pakt.config import Config, ServerConfig, get_config_dir
@@ -75,8 +75,6 @@ class ConfigUpdate(BaseModel):
 
     trakt_client_id: str | None = None
     trakt_client_secret: str | None = None
-    plex_url: str | None = None
-    plex_token: str | None = None
     watched_plex_to_trakt: bool | None = None
     watched_trakt_to_plex: bool | None = None
     ratings_plex_to_trakt: bool | None = None
@@ -87,7 +85,7 @@ class ConfigUpdate(BaseModel):
     rating_priority: str | None = None
     # Scheduler
     scheduler_enabled: bool | None = None
-    scheduler_interval_hours: int | None = None
+    scheduler_interval_hours: int | None = Field(default=None, ge=1, le=8760)
 
 
 class SyncRequest(BaseModel):
@@ -146,10 +144,8 @@ async def _scheduled_sync() -> None:
         config = Config.load()
 
         def on_token_refresh(token: dict):
-            config.trakt.access_token = token["access_token"]
-            config.trakt.refresh_token = token["refresh_token"]
-            config.trakt.expires_at = token["created_at"] + token["expires_in"]
-            config.save()
+            """Persist rotated Trakt tokens; refresh tokens are single-use so losing one forces a re-login."""
+            config.save_trakt_token(token)
             invalidate_config_cache()
 
         result = await run_multi_server_sync(
@@ -219,10 +215,6 @@ def create_app() -> FastAPI:
     templates = Jinja2Templates(directory=str(template_dir))
     assets_dir = Path(__file__).parent.parent / "assets"
 
-    # =========================================================================
-    # Web UI Routes
-    # =========================================================================
-
     @app.get("/favicon.ico")
     async def favicon():
         """Serve favicon."""
@@ -247,18 +239,14 @@ def create_app() -> FastAPI:
         """Main dashboard."""
         config = Config.load()
         return templates.TemplateResponse(
+            request,
             "index.html",
             {
-                "request": request,
                 "config": config,
                 "sync_state": sync_state,
                 "config_dir": str(get_config_dir()),
             },
         )
-
-    # =========================================================================
-    # API Routes
-    # =========================================================================
 
     @app.get("/api/status")
     async def get_status() -> dict[str, Any]:
@@ -339,13 +327,19 @@ def create_app() -> FastAPI:
             if cached_libs:
                 server_data["libraries"] = cached_libs
             else:
-                try:
-                    plex = PlexClient(s)
+                # plexapi is blocking and an offline server sits on its 30s timeout,
+                # which would stall sync progress and the scheduler along with it.
+                def fetch_libraries(server_config: ServerConfig = s) -> dict[str, list[str]]:
+                    """Connect and list this server's libraries."""
+                    plex = PlexClient(server_config)
                     plex.connect()
-                    libs = {
+                    return {
                         "movie": plex.get_movie_libraries(),
                         "show": plex.get_show_libraries(),
                     }
+
+                try:
+                    libs = await asyncio.to_thread(fetch_libraries)
                     set_cached(cache_key, libs)
                     server_data["libraries"] = libs
                 except Exception:
@@ -469,24 +463,28 @@ def create_app() -> FastAPI:
         if sync_state["running"]:
             return {"status": "error", "message": "Sync already running"}
 
+        # Claim the slot here, not in do_sync: background tasks run after the
+        # response is sent, so two requests would both get past the check.
+        sync_state["running"] = True
+        sync_state["cancelled"] = False
+        sync_state["logs"] = []
+
         def log(msg: str):
+            """Append a line for the web console to poll."""
             sync_state["logs"].append(msg)
 
         def is_cancelled() -> bool:
+            """Polled by the sync engine to notice a cancel request."""
             return sync_state["cancelled"]
 
         async def do_sync():
-            sync_state["running"] = True
-            sync_state["cancelled"] = False
-            sync_state["logs"] = []
+            """Run the sync in the background and mirror its outcome into sync_state."""
             try:
                 config = Config.load()
 
                 def on_token_refresh(token: dict):
-                    config.trakt.access_token = token["access_token"]
-                    config.trakt.refresh_token = token["refresh_token"]
-                    config.trakt.expires_at = token["created_at"] + token["expires_in"]
-                    config.save()
+                    """Persist rotated Trakt tokens; refresh tokens are single-use so losing one forces a re-login."""
+                    config.save_trakt_token(token)
                     invalidate_config_cache()
                     log("Token refreshed")
 
@@ -551,13 +549,15 @@ def create_app() -> FastAPI:
         return {"status": "started"}
 
     @app.get("/api/sync/status")
-    async def get_sync_status() -> dict[str, Any]:
-        """Get sync status."""
+    async def get_sync_status(since: int = 0) -> dict[str, Any]:
+        """Get sync status, returning only log lines the caller hasn't seen yet."""
+        logs = sync_state["logs"]
         return {
             "running": sync_state["running"],
             "last_run": sync_state["last_run"],
             "last_result": sync_state["last_result"],
-            "logs": sync_state["logs"],
+            "logs": logs[since:] if since else logs,
+            "log_count": len(logs),
         }
 
     @app.post("/api/sync/cancel")
@@ -675,7 +675,7 @@ def create_app() -> FastAPI:
             return {"status": "error", "message": str(e)}
 
     @app.post("/api/plex/test")
-    async def test_plex_connection() -> dict[str, Any]:
+    def test_plex_connection() -> dict[str, Any]:
         """Test Plex connection (first server)."""
         from pakt.plex import PlexClient
 
@@ -698,7 +698,7 @@ def create_app() -> FastAPI:
             return {"status": "error", "message": str(e)}
 
     @app.get("/api/plex/libraries")
-    async def get_plex_libraries() -> dict[str, Any]:
+    def get_plex_libraries() -> dict[str, Any]:
         """Get available Plex libraries and current selection (first server)."""
         from pakt.plex import PlexClient
 
@@ -725,10 +725,6 @@ def create_app() -> FastAPI:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    # =========================================================================
-    # Plex PIN Authentication
-    # =========================================================================
-
     # Store active PIN logins (pin_id -> (timestamp, login object))
     _plex_pin_logins: dict[int, tuple[float, Any]] = {}
     _PIN_MAX_AGE = 600  # 10 minutes (matches Plex PIN expiry)
@@ -741,7 +737,7 @@ def create_app() -> FastAPI:
             del _plex_pin_logins[pid]
 
     @app.post("/api/plex/pin")
-    async def start_plex_pin_login() -> dict[str, Any]:
+    def start_plex_pin_login() -> dict[str, Any]:
         """Start Plex PIN login flow."""
         from pakt.plex import start_plex_pin_login as _start_pin
 
@@ -760,7 +756,7 @@ def create_app() -> FastAPI:
             return {"status": "error", "message": str(e)}
 
     @app.get("/api/plex/pin/{pin_id}")
-    async def check_plex_pin_login(pin_id: int) -> dict[str, Any]:
+    def check_plex_pin_login(pin_id: int) -> dict[str, Any]:
         """Check if Plex PIN login has been authorized."""
         from pakt.plex import check_plex_pin_login as _check_pin
 
@@ -784,7 +780,7 @@ def create_app() -> FastAPI:
             return {"status": "error", "message": str(e)}
 
     @app.get("/api/plex/discover")
-    async def discover_plex_servers() -> dict[str, Any]:
+    def discover_plex_servers() -> dict[str, Any]:
         """Discover Plex servers from account."""
         from pakt.plex import discover_servers
 
@@ -809,10 +805,6 @@ def create_app() -> FastAPI:
             }
         except Exception as e:
             return {"status": "error", "message": str(e)}
-
-    # =========================================================================
-    # Server Management
-    # =========================================================================
 
     @app.get("/api/servers")
     async def get_servers() -> dict[str, Any]:
@@ -949,7 +941,7 @@ def create_app() -> FastAPI:
         return {"status": "ok", "message": f"Removed server: {name}"}
 
     @app.post("/api/servers/{name}/test")
-    async def test_server(name: str) -> dict[str, Any]:
+    def test_server(name: str) -> dict[str, Any]:
         """Test connection to a specific server."""
         from pakt.plex import PlexClient
 
@@ -972,7 +964,7 @@ def create_app() -> FastAPI:
             return {"status": "error", "message": str(e)}
 
     @app.get("/api/servers/{name}/libraries")
-    async def get_server_libraries(name: str) -> dict[str, Any]:
+    def get_server_libraries(name: str) -> dict[str, Any]:
         """Get libraries for a specific server."""
         from pakt.plex import PlexClient
 
@@ -1019,6 +1011,7 @@ def create_app() -> FastAPI:
     async def shutdown_server() -> dict[str, str]:
         """Shutdown the web server."""
         async def do_shutdown():
+            """Let the HTTP response flush before killing the process."""
             await asyncio.sleep(0.5)
             os._exit(0)
 

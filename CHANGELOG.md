@@ -1,5 +1,35 @@
 # Changelog
 
+## [0.4.0] - 2026-07-21
+
+### Fixed
+- **Trakt watched endpoints now paginate** - Trakt began enforcing pagination on `/sync/watched/*` on 30 June 2026. Watched movies were silently capped at the first 100 items, and watched shows came back with no season data at all, which stopped episode sync working entirely. Both endpoints now walk every page.
+- **Web UI returned HTTP 500 on a fresh install** - starlette 1.x removed the `TemplateResponse` call signature the dashboard used
+- **Watch and rating dates** - Items sent to Trakt now carry `watched_at` and `rated_at` taken from Plex, instead of Trakt defaulting them to the moment the sync ran
+- **Episodes wrongly marked watched in Plex** - Trakt progress responses can list unwatched episodes, which were being treated as watched. Episode sync also stops now rather than acting on an empty index
+- **Scheduler could not be enabled from the web UI** - Reading a queued job's next run time before the scheduler started raised an error
+- **Config could be replaced with defaults** - An unreadable `config.json` fell back to defaults which the next save wrote over the top, losing tokens and servers
+- **Trakt token refresh could revert a settings change** - Refreshed tokens are now written without flushing a stale config snapshot
+- **Two syncs could run at once** - The web UI claimed the sync slot too late, so a second tab or a scheduled run could start alongside the first
+- **Duplicate libraries only half synced** - With the same title in two libraries, only the first copy was written back to Plex
+- **Repeated writes across servers** - A second Plex server could re-send items the first had already pushed to Trakt
+- **Web UI froze mid-sync** - Applying changes and the whole watchlist phase blocked the event loop, so progress stalled and cancel did nothing
+- **Ctrl+C did not cancel a running sync** - The handler was being replaced by uvicorn's own
+- **Tray "Sync Now" did nothing** - The callback was never wired up, and "Next sync" never appeared
+- **Server names containing quotes broke the settings buttons**
+- **Dropped connections are retried** - Only HTTP errors were retried before, and a rate limit on the final attempt waited before failing anyway
+- **A scheduler interval of 0 left the previous job running**
+
+### Added
+- **CI checks** - ruff and pyright run on push and pull request
+
+### Changed
+- **config.json** - Written atomically and with `0600` permissions on Linux and macOS. An unreadable config is moved aside to `config.json.corrupt` rather than overwritten
+- **Sync log polling** - The web UI now requests only new lines instead of the whole log four times a second
+
+### Removed
+- Unused public helpers, a breaking change only if you import pakt as a library: `MediaItem`, `MediaType`, `TraktIds`, `extract_trakt_ids`, the Plex to `MediaItem` converters, and the per-show `get_watched_episodes` / `iter_*_by_library` methods
+
 ## [0.3.2] - 2026-03-05
 
 ### Fixed

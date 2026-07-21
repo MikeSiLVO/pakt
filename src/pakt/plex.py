@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator, Sequence
+from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
@@ -12,7 +12,7 @@ from plexapi.server import PlexServer
 from plexapi.video import Episode, Movie, Show
 
 from pakt.config import Config, ServerConfig
-from pakt.models import MediaItem, MediaType, PlexIds
+from pakt.models import PlexIds
 
 logger = logging.getLogger(__name__)
 
@@ -40,8 +40,6 @@ def start_plex_pin_login() -> tuple[MyPlexPinLogin, PlexPinAuth]:
     """
     login = MyPlexPinLogin()
 
-    # Explicitly trigger PIN fetch if not already done
-    # The pin property should call _getCode() but let's be explicit
     if hasattr(login, '_getCode'):
         login._getCode()
 
@@ -49,7 +47,6 @@ def start_plex_pin_login() -> tuple[MyPlexPinLogin, PlexPinAuth]:
     pin_id = getattr(login, '_id', None)
 
     if not pin_code:
-        # Try accessing the pin property which might trigger the fetch
         try:
             pin_code = login.pin
         except Exception as e:
@@ -97,6 +94,7 @@ class DiscoveredServer:
 
     @property
     def has_local_connection(self) -> bool:
+        """Whether the server advertises a LAN address, which is faster than relay."""
         return any(c.get("local") for c in self.connections)
 
     @property
@@ -126,19 +124,17 @@ def discover_servers(account_token: str) -> list[DiscoveredServer]:
         if "server" not in resource.provides:
             continue
 
-        connections = []
-        for conn in resource.connections:
-            connections.append({
-                "uri": conn.uri,
-                "local": conn.local,
-                "relay": conn.relay,
-            })
+        connections = [
+            {"uri": conn.uri, "local": conn.local, "relay": conn.relay}
+            for conn in resource.connections
+            if conn is not None
+        ]
 
         servers.append(DiscoveredServer(
             name=resource.name,
             client_identifier=resource.clientIdentifier,
             provides=resource.provides,
-            owned=resource.owned,
+            owned=bool(resource.owned),
             connections=connections,
         ))
 
@@ -209,8 +205,12 @@ class PlexClient:
         if not self._server:
             return
 
-        new_url = self._server._baseurl
-        new_token = self._server._token
+        # plexapi types these loosely, but both are strings on a live connection
+        new_url = str(self._server._baseurl or "")
+        new_token = str(self._server._token or "")
+
+        if not new_url or not new_token:
+            return
 
         if new_url == self._url and new_token == self._token:
             return
@@ -241,8 +241,11 @@ class PlexClient:
 
     @property
     def server(self) -> PlexServer:
+        """Connected server, dialling out on first use."""
         if not self._server:
             self.connect()
+        if not self._server:
+            raise RuntimeError(f"Not connected to Plex server '{self.server_config.name}'")
         return self._server
 
     def get_movie_libraries(self) -> list[str]:
@@ -348,50 +351,6 @@ class PlexClient:
             episodes.extend(section_episodes)
         return episodes, lib_counts
 
-    def iter_movies_by_library(self, library_names: list[str] | None = None) -> Iterator[tuple[str, list[Movie]]]:
-        """Yield movies one library at a time for memory efficiency."""
-        for section in self.server.library.sections():
-            if section.type != "movie":
-                continue
-            if library_names and section.title not in library_names:
-                continue
-            yield section.title, section.all()
-
-    def iter_episodes_by_library(self, library_names: list[str] | None = None) -> Iterator[tuple[str, list[Episode]]]:
-        """Yield episodes one library at a time for memory efficiency."""
-        for section in self.server.library.sections():
-            if section.type != "show":
-                continue
-            if library_names and section.title not in library_names:
-                continue
-            yield section.title, section.searchEpisodes()
-
-    def get_watched_movies(self, library_names: list[str] | None = None) -> list[Movie]:
-        """Get all watched movies."""
-        movies = []
-        for section in self.server.library.sections():
-            if section.type != "movie":
-                continue
-            if library_names and section.title not in library_names:
-                continue
-            movies.extend(section.search(unwatched=False))
-        return movies
-
-    def get_watched_episodes(self, library_names: list[str] | None = None) -> list[Episode]:
-        """Get all watched episodes."""
-        episodes = []
-        for section in self.server.library.sections():
-            if section.type != "show":
-                continue
-            if library_names and section.title not in library_names:
-                continue
-            # Get all episodes that are watched
-            for show in section.all():
-                for episode in show.episodes():
-                    if episode.isWatched:
-                        episodes.append(episode)
-        return episodes
-
     def mark_watched(self, item: Movie | Episode) -> None:
         """Mark an item as watched."""
         item.markWatched()
@@ -451,6 +410,7 @@ class PlexClient:
         failed: list[tuple[Movie | Show | Episode, int | float, Exception]] = []
 
         def rate_item(pair: tuple[Movie | Show | Episode, int | float]) -> None:
+            """Runs on the thread pool, one item per worker."""
             item, rating = pair
             item.rate(rating)
 
@@ -773,37 +733,3 @@ def extract_plex_ids(item: Movie | Show | Episode) -> PlexIds:
 
     return plex_id
 
-
-def plex_movie_to_media_item(movie: Movie) -> MediaItem:
-    """Convert Plex movie to MediaItem."""
-    plex_ids = extract_plex_ids(movie)
-
-    return MediaItem(
-        title=movie.title,
-        year=movie.year,
-        media_type=MediaType.MOVIE,
-        plex_ids=plex_ids,
-        watched=movie.isWatched,
-        watched_at=movie.lastViewedAt,
-        plays=movie.viewCount or 0,
-        rating=int(movie.userRating) if movie.userRating else None,
-    )
-
-
-def plex_episode_to_media_item(episode: Episode) -> MediaItem:
-    """Convert Plex episode to MediaItem."""
-    plex_ids = extract_plex_ids(episode)
-
-    return MediaItem(
-        title=episode.title,
-        year=episode.year,
-        media_type=MediaType.EPISODE,
-        plex_ids=plex_ids,
-        watched=episode.isWatched,
-        watched_at=episode.lastViewedAt,
-        plays=episode.viewCount or 0,
-        rating=int(episode.userRating) if episode.userRating else None,
-        show_title=episode.grandparentTitle,
-        season=episode.seasonNumber,
-        episode=episode.episodeNumber,
-    )

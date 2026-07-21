@@ -138,8 +138,15 @@ class Config(BaseModel):
             try:
                 data = json.loads(config_file.read_text(encoding="utf-8"))
                 return cls(**data)
-            except (json.JSONDecodeError, Exception) as e:
-                logger.warning(f"Failed to load config.json: {e}")
+            except Exception as e:
+                # Defaults would be saved straight back over the file, losing tokens
+                # and servers, so move the bad copy aside first.
+                quarantine = config_dir / "config.json.corrupt"
+                try:
+                    config_file.replace(quarantine)
+                    logger.error("Could not read config.json (%s). Moved it to %s", e, quarantine)
+                except OSError as move_error:
+                    logger.error("Could not read or quarantine config.json: %s / %s", e, move_error)
                 return cls()
 
         # Migration: check for legacy .env and servers.json
@@ -151,15 +158,36 @@ class Config(BaseModel):
         return cls()
 
     def save(self, config_dir: Path | None = None) -> None:
-        """Save configuration to config.json."""
+        """Save configuration to config.json, replacing it in one step."""
         if config_dir is None:
             config_dir = get_config_dir()
 
         config_file = config_dir / "config.json"
-        config_file.write_text(
-            self.model_dump_json(indent=2),
-            encoding="utf-8",
-        )
+        temp_file = config_file.with_suffix(".json.tmp")
+
+        # A half-written config.json is unrecoverable, so build it alongside and swap.
+        temp_file.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        try:
+            os.chmod(temp_file, 0o600)
+        except OSError:
+            pass  # Windows and some filesystems don't support it
+        os.replace(temp_file, config_file)
+
+    def save_trakt_token(self, token: dict, config_dir: Path | None = None) -> None:
+        """Write refreshed Trakt tokens without flushing the rest of this (possibly stale) object.
+
+        Sync holds a Config for its whole run, so saving it wholesale would revert
+        any setting changed in the meantime.
+        """
+        self.trakt.access_token = token["access_token"]
+        self.trakt.refresh_token = token["refresh_token"]
+        self.trakt.expires_at = token["created_at"] + token["expires_in"]
+
+        current = Config.load(config_dir)
+        current.trakt.access_token = self.trakt.access_token
+        current.trakt.refresh_token = self.trakt.refresh_token
+        current.trakt.expires_at = self.trakt.expires_at
+        current.save(config_dir)
 
 
 def _migrate_legacy_config(config_dir: Path) -> Config | None:
@@ -188,6 +216,7 @@ def _migrate_legacy_config(config_dir: Path) -> Config | None:
 
     # Sync config
     def parse_bool(val: str) -> bool:
+        """Read the loose truthy spellings the old .env allowed."""
         return val.lower() in ("true", "1", "yes")
 
     config.sync.watched_plex_to_trakt = parse_bool(env_vars.get("PAKT_SYNC_WATCHED_PLEX_TO_TRAKT", "true"))
