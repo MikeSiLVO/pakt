@@ -1,5 +1,3 @@
 """Pakt - Fast, efficient Plex-Trakt sync."""
 
-from importlib.metadata import version
-
-__version__ = version("pakt")
+__version__ = "0.4.0"

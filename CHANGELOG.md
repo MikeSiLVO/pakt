@@ -46,6 +46,7 @@
 - **Dependencies raised past known vulnerabilities** - certifi, h11, Jinja2, Pillow, pydantic, requests, starlette and urllib3
 
 ### Changed
+- **Faster syncs and CLI startup**
 - **Docker** - The container runs as an unprivileged user on a read-only filesystem, and the web UI is published on `localhost` only. Mount the config volume at `/home/pakt/.config/pakt`; the container stops with a message while it is still at `/root/.config/pakt`. See the Docker guide to publish the port on your network
 - **Trakt login uses `auth.trakt.tv`** - Trakt stops accepting logins through other hosts on 1 February 2027
 - **Trakt requests identify as `pakt/<version>`**, and Plex requests as Pakt with a device ID kept in config.json

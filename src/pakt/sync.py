@@ -388,6 +388,8 @@ class SyncEngine:
         self._cache = trakt_cache or TraktCache()
         self._pushed = pushed or PushedToTrakt()
         self._fix_collection_dates = False
+        self._plex_cache: dict[str, tuple[list, dict[str, int]]] = {}
+        self._keep_plex = False
 
     def _get_sync_option(self, option: str) -> bool:
         """Get effective sync option, checking server override first."""
@@ -433,8 +435,12 @@ class SyncEngine:
         self, fetch: Callable[[list[str] | None], tuple[list, dict[str, int]]],
         libraries: list[str] | None, warn: bool = True,
     ) -> tuple[list, dict[str, int]]:
-        """Fetch Plex items off the event loop, warning about configured libraries it lacks."""
+        """Fetch Plex items off the event loop, reusing a kept copy; warns of missing libraries."""
+        if fetch.__name__ in self._plex_cache:
+            return self._plex_cache[fetch.__name__]
         items, counts = await asyncio.to_thread(fetch, libraries)
+        if self._keep_plex:
+            self._plex_cache[fetch.__name__] = (items, counts)
         for name in (libraries or []) if warn else []:
             if name not in counts:
                 self._log(f"  [yellow]Library '{_safe(name)}' not found on this server[/]")
@@ -815,6 +821,7 @@ class SyncEngine:
                 movie["collected_at"] = collected_at
             best[keys[0]] = (score, movie)
         movies_to_collect = [movie for _, movie in best.values()]
+        self._plex_cache.clear()
         del plex_movies, best
 
         show_info = {str(show.ratingKey): (extract_plex_ids(show), show.title, show.year) for show in plex_shows}
@@ -998,6 +1005,8 @@ class SyncEngine:
     ) -> SyncResult | None:
         """Sync this server through every enabled phase; None if cancelled."""
         self._fix_collection_dates = fix_collection_dates
+        # phase 3 reads the same Plex lists as phases 1 and 2
+        self._keep_plex = not collection_only and self._get_sync_option("collection_plex_to_trakt")
         start_time = time.time()
         result = SyncResult()
 

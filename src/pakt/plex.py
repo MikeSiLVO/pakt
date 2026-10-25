@@ -387,8 +387,8 @@ class PlexClient:
         return failed
 
     def get_watchlist(self) -> list[Movie | Show]:
-        """Get account watchlist (includes items not in library)."""
-        return self.account.watchlist()
+        """Get account watchlist (includes items not in library), with each item's external IDs."""
+        return _disable_auto_reload(self.account.watchlist(includeGuids=1))
 
     def add_to_watchlist_batch(self, items: Sequence[Movie | Show]) -> list[tuple[Movie | Show, Exception]]:
         """Add items to the account watchlist one by one; returns (item, error) for any failures."""

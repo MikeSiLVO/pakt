@@ -2,19 +2,16 @@
 
 from __future__ import annotations
 
-import asyncio
 import sys
 import time
 
 import click
-import httpx
 from rich.console import Console
 from rich.markup import escape
 from rich.table import Table
 
 from pakt import __version__
 from pakt.config import Config, ServerConfig, get_config_dir
-from pakt.trakt import DeviceAuthStatus, TraktClient
 
 console = Console()
 
@@ -45,7 +42,9 @@ def _make_token_refresh_callback(config: Config):
 @click.option("--no-shows", is_flag=True, help="Skip show/episode sync")
 def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_dates: bool,
          collection_only: bool, no_movies: bool, no_shows: bool):
-    """Sync watched status and ratings between Plex and Trakt."""
+    """Sync watched status, ratings, collection and watchlist between Plex and Trakt."""
+    import asyncio
+
     from pakt.sync import run_multi_server_sync
 
     config = Config.load()
@@ -89,6 +88,8 @@ def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_
 
 async def _trakt_device_login(config: Config) -> bool:
     """Run Trakt's device login, showing the code; saves the tokens and returns True on success."""
+    from pakt.trakt import DeviceAuthStatus, TraktClient
+
     client = TraktClient(config.trakt)
     console.print("[cyan]Getting device code...[/]")
     device = await client.device_code()
@@ -113,6 +114,8 @@ async def _trakt_device_login(config: Config) -> bool:
 @main.command()
 def login():
     """Authenticate with Trakt using device code flow."""
+    import asyncio
+
     if not asyncio.run(_trakt_device_login(Config.load())):
         sys.exit(1)
 
@@ -120,6 +123,8 @@ def login():
 @main.command()
 def logout():
     """Revoke Trakt authentication and clear tokens."""
+    import asyncio
+
     config = Config.load()
 
     if not config.trakt.access_token:
@@ -128,6 +133,10 @@ def logout():
 
     async def do_logout():
         """Revoke the token on Trakt, then clear it locally either way."""
+        import httpx
+
+        from pakt.trakt import TraktClient
+
         console.print("[cyan]Revoking Trakt access token...[/]")
         try:
             success = await TraktClient(config.trakt).revoke_token()
@@ -156,7 +165,6 @@ def setup(token: bool):
 
     console.print("\n[bold cyan]═══ Pakt Setup Wizard ═══[/]\n")
 
-    # Check what's already configured
     trakt_done = bool(config.trakt.access_token)
     plex_done = bool(config.servers)
 
@@ -171,9 +179,9 @@ def setup(token: bool):
         else:
             return
 
-    # Step 1: Trakt
     if not trakt_done:
         console.print("[bold]Step 1: Trakt Authentication[/]\n")
+        import asyncio
 
         if not asyncio.run(_trakt_device_login(config)):
             console.print("\n[yellow]Setup incomplete. Run 'pakt setup' to try again.[/]")
@@ -181,22 +189,18 @@ def setup(token: bool):
     else:
         console.print("[green]✓[/] Trakt: Already authenticated\n")
 
-    # Step 2: Plex
     if not plex_done:
         console.print("\n[bold]Step 2: Plex Connection[/]\n")
 
         if token:
-            # Manual token entry (legacy flow)
             _setup_plex_manual(config)
         else:
-            # PIN authentication (default)
             _setup_plex_pin(config)
 
     else:
         console.print("[green]✓[/] Plex: Already configured")
         console.print(f"    Servers: {', '.join(s.name for s in config.servers)}")
 
-    # Done!
     console.print("\n[bold green]═══ Setup Complete! ═══[/]\n")
     console.print("You're ready to sync. Try these commands:")
     console.print("  [cyan]pakt sync --dry-run[/]  - Preview what will sync")
@@ -209,10 +213,11 @@ def _setup_plex_manual(config: Config) -> None:
     """Set up Plex from a pasted URL and token, testing the connection before saving."""
     from pakt.plex import PlexClient
 
-    # Try to auto-detect local Plex
     console.print("[dim]Checking for local Plex server...[/]")
     detected_url = None
     try:
+        import httpx
+
         resp = httpx.get("http://localhost:32400/identity", timeout=2)
         if resp.status_code == 200:
             detected_url = "http://localhost:32400"
@@ -231,13 +236,11 @@ def _setup_plex_manual(config: Config) -> None:
     console.print("5. Copy just the token part after the =[/]\n")
 
     plex_token = click.prompt("Plex token")
-    # Auto-strip prefix if user pasted the whole thing
     if plex_token.lower().startswith("x-plex-token="):
         plex_token = plex_token[13:]
     elif plex_token.startswith("="):
         plex_token = plex_token[1:]
 
-    # Create a server config for testing
     server_config = ServerConfig(
         name="default",
         url=plex_url,
@@ -245,7 +248,6 @@ def _setup_plex_manual(config: Config) -> None:
         enabled=True,
     )
 
-    # Test connection
     console.print("\n[dim]Testing connection...[/]")
     try:
         plex = PlexClient(server_config)
@@ -403,24 +405,21 @@ def serve(host: str | None, port: int | None, tray: bool | None):
 
     import uvicorn
 
-    from pakt.config import Config, get_config_dir
-    from pakt.web import create_app
-    from pakt.web.app import sync_state
+    from pakt.web.app import create_app, sync_state
 
-    # Load config for defaults, save to ensure web section exists in config.json
+    # save so config.json gains the web section
     config = Config.load()
     host = host or config.web.host
     port = port or config.web.port
     config.save()
     local_url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::', '') else host}:{port}"
 
-    # Only show tray when explicitly requested with --tray
     show_tray = tray is True
 
-    # Suppress console output only when --tray explicitly passed (for pythonw compatibility)
+    # pythonw has no console
     silent_mode = tray is True
 
-    # Check port availability early (before log rotation)
+    # check before rotating debug.log, which a running instance still writes
     import socket
     port_in_use = False
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -430,7 +429,6 @@ def serve(host: str | None, port: int | None, tray: bool | None):
     except OSError:
         port_in_use = True
 
-    # Debug logging for pythonw troubleshooting
     debug_log = None
     def log(msg: str) -> None:
         """No-op stand-in used when debug logging is off."""
@@ -446,7 +444,6 @@ def serve(host: str | None, port: int | None, tray: bool | None):
                 conflict_log = get_config_dir() / "debug.conflict.log"
                 debug_log = open(conflict_log, "w")
             else:
-                # Rotate: current -> .1 (discard older)
                 if log_path.exists():
                     if old_log_path.exists():
                         old_log_path.unlink()
@@ -466,7 +463,6 @@ def serve(host: str | None, port: int | None, tray: bool | None):
         except Exception:
             pass
 
-    # Redirect stdout/stderr to devnull in silent mode (for pythonw)
     # Kept open for process lifetime, intentionally not closed
     _devnull = None
     if silent_mode:
@@ -496,6 +492,8 @@ def serve(host: str | None, port: int | None, tray: bool | None):
 
                 def trigger_sync():
                     """Start a sync over the local API, since the tray runs off the event loop."""
+                    import httpx
+
                     try:
                         httpx.post(f"{web_url}/api/sync", json={}, timeout=10.0)
                     except Exception as e:
