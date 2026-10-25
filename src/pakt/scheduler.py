@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 class SyncScheduler:
-    """Manages scheduled sync operations."""
+    """Interval scheduler that runs the sync from inside pakt serve."""
 
     def __init__(
         self,
@@ -33,7 +33,7 @@ class SyncScheduler:
         self._job_id = "pakt_sync"
 
     def start(self) -> None:
-        """Start the scheduler if enabled in config."""
+        """Start the scheduler if config enables it with a positive interval."""
         if not self.config.scheduler.enabled:
             logger.info("Scheduler disabled in config")
             return
@@ -75,15 +75,14 @@ class SyncScheduler:
                 id=self._job_id,
                 name="Pakt Sync",
                 replace_existing=True,
-                # A sync can block well past APScheduler's 1s default grace,
-                # which would silently drop that run until the next interval.
+                # a sync can outlast APScheduler's 1s default grace, which would drop that run
                 misfire_grace_time=None,
                 coalesce=True,
                 max_instances=1,
             )
 
     async def _run_sync(self) -> None:
-        """Execute the sync if not already running."""
+        """Run the sync unless one is already running, logging a failure instead of raising."""
         if self.is_running_func():
             logger.info("Scheduled sync skipped - sync already running")
             return
@@ -106,8 +105,7 @@ class SyncScheduler:
             return
 
         if interval_hours <= 0:
-            # Leaving the job in place would keep firing on the old interval
-            # while config and UI both report it as off.
+            # a leftover job would keep firing while config and UI report the scheduler off
             if self.scheduler.get_job(self._job_id):
                 self.scheduler.remove_job(self._job_id)
             logger.warning("Invalid interval, scheduler disabled")
@@ -129,11 +127,11 @@ class SyncScheduler:
 
     @property
     def is_enabled(self) -> bool:
-        """Check if scheduler is enabled and running."""
+        """Whether the scheduler is running with a job queued."""
         return self.scheduler.running and self.scheduler.get_job(self._job_id) is not None
 
     def get_status(self) -> dict[str, Any]:
-        """Get scheduler status."""
+        """Get the scheduler's state, interval, and next and last run times."""
         return {
             "enabled": self.is_enabled,
             "interval_hours": self.config.scheduler.interval_hours,

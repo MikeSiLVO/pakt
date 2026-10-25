@@ -3,8 +3,7 @@
 import os
 import sys
 
-# Fix for pythonw (no console) - replace None stdin/stdout/stderr with devnull
-# Must happen before importing cli which creates Rich Console at module level
+# pythonw leaves the std streams as None, which the Rich consoles created on import cannot use
 if sys.stdin is None:
     sys.stdin = open(os.devnull, "r")
 if sys.stdout is None:

@@ -19,7 +19,7 @@ class PlexIds(BaseModel):
 
 
 class SyncResult(BaseModel):
-    """Result of a sync operation."""
+    """Counts and errors from a sync run."""
 
     added_to_trakt: int = 0
     added_to_plex: int = 0
@@ -33,7 +33,7 @@ class SyncResult(BaseModel):
 
 
 class WatchedItem(BaseModel):
-    """Item from Trakt watched endpoint."""
+    """An entry from Trakt's watched endpoints."""
 
     plays: int = 0
     last_watched_at: datetime | None = None
@@ -44,7 +44,7 @@ class WatchedItem(BaseModel):
 
 
 class RatedItem(BaseModel):
-    """Item from Trakt ratings endpoint."""
+    """An entry from Trakt's ratings endpoints."""
 
     rated_at: datetime
     rating: int

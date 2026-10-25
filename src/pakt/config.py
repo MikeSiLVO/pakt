@@ -15,11 +15,11 @@ logger = logging.getLogger(__name__)
 
 
 def get_config_dir() -> Path:
-    """Get the configuration directory (platform-appropriate), private to the user."""
-    if os.name == "nt":  # Windows
+    """Get the configuration directory for this platform, creating it private to the user."""
+    if os.name == "nt":
         base = Path(os.environ.get("APPDATA", Path.home()))
         config_dir = base / "pakt"
-    else:  # Linux/macOS
+    else:
         config_dir = Path.home() / ".config" / "pakt"
     config_dir.mkdir(parents=True, exist_ok=True)
     if os.name != "nt":
@@ -44,7 +44,7 @@ def set_last_sync(when: datetime) -> None:
 
 
 class TraktConfig(BaseModel):
-    """Trakt API configuration."""
+    """Trakt API credentials and the signed-in user's tokens."""
 
     client_id: str = "bc25ba5024e871104e3a090b98e44895670d66d89d5296fa6ed027d6e2a44f9d"
     access_token: str = ""
@@ -53,7 +53,7 @@ class TraktConfig(BaseModel):
 
 
 class SyncConfig(BaseModel):
-    """Sync behavior configuration."""
+    """Which data syncs in which direction, and which rating wins a conflict."""
 
     watched_plex_to_trakt: bool = True
     watched_trakt_to_plex: bool = True
@@ -66,14 +66,14 @@ class SyncConfig(BaseModel):
 
 
 class SchedulerConfig(BaseModel):
-    """Scheduler configuration."""
+    """Whether and how often the built-in scheduler syncs."""
 
     enabled: bool = False
     interval_hours: int = 0
 
 
 class WebConfig(BaseModel):
-    """Web server configuration."""
+    """Address the web UI listens on and the extra host names it answers to."""
 
     host: str = "127.0.0.1"
     port: int = 7258
@@ -81,7 +81,7 @@ class WebConfig(BaseModel):
 
 
 class ServerSyncOverrides(BaseModel):
-    """Per-server sync option overrides. None = use global setting."""
+    """Per-server sync options; None falls back to the global setting."""
 
     watched_plex_to_trakt: bool | None = None
     watched_trakt_to_plex: bool | None = None
@@ -93,7 +93,7 @@ class ServerSyncOverrides(BaseModel):
 
 
 class ServerConfig(BaseModel):
-    """Configuration for a single Plex server."""
+    """One Plex server: how to reach it, its own token, and what it syncs."""
 
     name: str
     url: str = ""
@@ -125,19 +125,19 @@ class Config(BaseModel):
     trakt: TraktConfig = Field(default_factory=TraktConfig)
 
     def get_server(self, name: str) -> ServerConfig | None:
-        """Get server by name."""
+        """Get a configured server by name, or None."""
         for server in self.servers:
             if server.name == name:
                 return server
         return None
 
     def get_enabled_servers(self) -> list[ServerConfig]:
-        """Get all enabled servers."""
+        """Get the servers that take part in a sync."""
         return [s for s in self.servers if s.enabled]
 
     @classmethod
     def load(cls, config_dir: Path | None = None) -> Config:
-        """Load configuration from config.json, with migration from legacy formats."""
+        """Load config.json, moving an unreadable one aside and migrating a legacy .env."""
         if config_dir is None:
             config_dir = get_config_dir()
 
@@ -148,8 +148,7 @@ class Config(BaseModel):
                 data = json.loads(config_file.read_text(encoding="utf-8"))
                 return cls(**data)
             except Exception as e:
-                # Defaults would be saved straight back over the file, losing tokens
-                # and servers, so move the bad copy aside first.
+                # defaults saved over an unreadable file would lose its tokens and servers
                 quarantine = config_dir / "config.json.corrupt"
                 try:
                     config_file.replace(quarantine)
@@ -158,7 +157,6 @@ class Config(BaseModel):
                     logger.error("Could not read or quarantine config.json: %s / %s", e, move_error)
                 return cls()
 
-        # Migration: check for legacy .env and servers.json
         config = _migrate_legacy_config(config_dir)
         if config:
             config.save(config_dir)
@@ -167,14 +165,14 @@ class Config(BaseModel):
         return cls()
 
     def save(self, config_dir: Path | None = None) -> None:
-        """Save configuration to config.json, replacing it in one step."""
+        """Save configuration to config.json, private to the user and replaced in one step."""
         if config_dir is None:
             config_dir = get_config_dir()
 
         config_file = config_dir / "config.json"
         temp_file = config_file.with_suffix(".json.tmp")
 
-        # A half-written config.json is unrecoverable, so build it alongside and swap.
+        # a half-written config.json is unrecoverable
         fd = os.open(temp_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(self.model_dump_json(indent=2))

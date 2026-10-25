@@ -22,7 +22,7 @@ TRAKT_API_URL = "https://api.trakt.tv"
 TRAKT_AUTH_URL = "https://auth.trakt.tv"
 USER_AGENT = f"pakt/{__version__}"
 
-# Refresh token 1 day before expiry (tokens valid for 7 days)
+# Trakt access tokens last 7 days
 TOKEN_REFRESH_THRESHOLD = 24 * 60 * 60
 
 # Trakt allows one authenticated write per second
@@ -67,7 +67,7 @@ def _merge_counts(total: dict[str, Any], part: dict[str, Any]) -> None:
 
 
 class TraktRateLimitError(Exception):
-    """Raised when rate limited."""
+    """Error raised when Trakt still rate limits after every retry."""
 
     def __init__(self, retry_after: int):
         """Carry the server's Retry-After so callers can wait the right amount."""
@@ -76,7 +76,7 @@ class TraktRateLimitError(Exception):
 
 
 class TraktAccountLimitError(Exception):
-    """Raised when account limit exceeded (HTTP 420)."""
+    """Error raised when Trakt refuses an addition over the account limit (HTTP 420)."""
 
     def __init__(self, limit: int | None, is_vip: bool, upgrade_url: str = "https://trakt.tv/vip"):
         """Carry the limit and upgrade URL Trakt returned so the message can point at a fix."""
@@ -90,7 +90,7 @@ class TraktAccountLimitError(Exception):
 
 
 class TraktAuthError(Exception):
-    """Raised when authentication fails (invalid/expired tokens)."""
+    """Error raised when Trakt refuses the token, the API key or the account."""
 
     def __init__(self, message: str = "Authentication failed. Run 'pakt login' to re-authenticate."):
         """Default to the message that tells the user how to recover."""
@@ -155,7 +155,7 @@ class TraktClient:
             await self._client.aclose()
 
     def _token_needs_refresh(self) -> bool:
-        """Check if access token needs refresh (within threshold of expiry)."""
+        """Whether the access token is within a day of expiring."""
         if not self.config.access_token or not self.config.refresh_token:
             return False
         if not self.config.expires_at:
@@ -303,7 +303,7 @@ class TraktClient:
         return items
 
     async def get_watched_movies(self) -> list[WatchedItem]:
-        """Get all watched movies. Trakt paginates this endpoint at 250 items max."""
+        """Get all watched movies, paging through Trakt's 250-item maximum."""
         items = await self._paginated_get("/sync/watched/movies", limit=250)
         return [WatchedItem(**item) for item in items]
 
@@ -315,12 +315,12 @@ class TraktClient:
         return [WatchedItem(**item) for item in items]
 
     async def get_movie_ratings(self) -> list[RatedItem]:
-        """Get ALL movie ratings in a single API call."""
+        """Get all movie ratings; Trakt returns them in one response."""
         response = await self._request("GET", "/sync/ratings/movies")
         return [RatedItem(**item) for item in response.json()]
 
     async def get_episode_ratings(self) -> list[RatedItem]:
-        """Get ALL episode ratings in a single API call."""
+        """Get all episode ratings; Trakt returns them in one response."""
         response = await self._request("GET", "/sync/ratings/episodes")
         return [RatedItem(**item) for item in response.json()]
 
@@ -395,7 +395,7 @@ class TraktClient:
         return await self._post_sync("/sync/watchlist", movies=movies, shows=shows)
 
     async def device_code(self) -> dict[str, Any]:
-        """Start device authentication flow."""
+        """Start a device login, returning Trakt's codes, address and polling interval."""
         async with self._auth_client() as client:
             response = await client.post("/oauth/device/code", json={"client_id": self.config.client_id})
             response.raise_for_status()

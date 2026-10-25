@@ -21,19 +21,17 @@ except ImportError:
 
 
 def _get_icon_image() -> "Image.Image":
-    """Load icon from assets or create fallback."""
+    """Get the tray icon from assets, or draw a plain one."""
     if not TRAY_AVAILABLE:
         raise ImportError("PIL is required")
 
-    # Try to load from assets
     assets_dir = Path(__file__).parent / "assets"
     icon_path = assets_dir / "icon.png"
     if icon_path.exists():
         return Image.open(icon_path)
 
-    # Fallback: create simple programmatic icon
     size = 64
-    img = Image.new("RGBA", (size, size), (45, 212, 191, 255))  # Teal background
+    img = Image.new("RGBA", (size, size), (45, 212, 191, 255))
     return img
 
 
@@ -63,12 +61,12 @@ class PaktTray:
         webbrowser.open(self.web_url)
 
     def _trigger_sync(self) -> None:
-        """Trigger a sync operation."""
+        """Trigger a sync through the callback the app supplied."""
         if self.sync_callback:
             self.sync_callback()
 
     def _exit(self) -> None:
-        """Exit the application."""
+        """Exit the application: remove the icon, then run the shutdown callback."""
         if self._icon:
             self._icon.stop()
         if self.shutdown_callback:

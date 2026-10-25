@@ -19,16 +19,8 @@ console = Console()
 @click.group()
 @click.version_option(version=__version__, prog_name="pakt")
 def main():
-    """Pakt - Fast Plex-Trakt sync using batch operations."""
+    """Pakt: fast Plex-Trakt sync using batch operations."""
     pass
-
-
-def _make_token_refresh_callback(config: Config):
-    """Create a callback that saves tokens when they're refreshed."""
-    def on_token_refresh(token: dict):
-        """Persist rotated Trakt tokens to config.json."""
-        config.save_trakt_token(token)
-    return on_token_refresh
 
 
 @main.command()
@@ -67,7 +59,7 @@ def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_
         collection_only=collection_only,
         no_movies=no_movies,
         no_shows=no_shows,
-        on_token_refresh=_make_token_refresh_callback(config),
+        on_token_refresh=config.save_trakt_token,
     ))
 
     title = "[bold yellow]Sync finished with errors[/]" if result.errors else "[bold green]Sync complete![/]"
@@ -275,14 +267,12 @@ def _setup_plex_pin(config: Config) -> None:
     console.print("Link your Plex account to discover your servers automatically.\n")
     console.print("[bold]→ Go to:[/] [cyan]https://plex.tv/link[/]")
 
-    # Start PIN login
     login_obj, auth_info = start_plex_pin_login()
     console.print(f"[bold]→ Enter:[/] [bold yellow]{auth_info.pin}[/]")
     console.print("\n[dim]Waiting for you to authorize...[/]")
 
-    # Poll for completion
     account_token = None
-    max_attempts = 60  # 5 minutes at 5 second intervals
+    max_attempts = 60
     for _ in range(max_attempts):
         account_token = check_plex_pin_login(login_obj)
         if account_token:
@@ -296,11 +286,9 @@ def _setup_plex_pin(config: Config) -> None:
 
     console.print("\n[green]✓ Plex account linked![/]")
 
-    # Save account token
     config.plex_token = account_token
     config.save()
 
-    # Discover servers
     console.print("\n[dim]Discovering servers...[/]")
     try:
         discovered = discover_servers(account_token)
@@ -318,7 +306,6 @@ def _setup_plex_pin(config: Config) -> None:
         local = "[cyan]local[/]" if server.has_local_connection else ""
         console.print(f"  {i}. {server.name} ({owned}) {local}")
 
-    # Select servers to enable
     console.print("\n[dim]Enter server numbers to enable (comma-separated), 'owned' or 'all':[/]")
     selection = click.prompt("Enable servers", default="owned")
 
@@ -334,9 +321,7 @@ def _setup_plex_pin(config: Config) -> None:
             console.print("[yellow]Invalid selection, enabling owned servers[/]")
             selected_servers = [s for s in discovered if s.owned]
 
-    # Create ServerConfig for each selected server
     for server in selected_servers:
-        # Check if already configured
         existing = config.get_server(server.name)
         if existing:
             console.print(f"  [dim]Server '{server.name}' already configured, updating...[/]")
@@ -366,7 +351,6 @@ def status():
 
     console.print("[bold]Pakt Status[/]\n")
 
-    # Trakt status
     table = Table(title="Trakt")
     table.add_column("Setting", style="cyan")
     table.add_column("Value")
@@ -375,7 +359,6 @@ def status():
     table.add_row("Authenticated", "[green]Yes[/]" if config.trakt.access_token else "[red]No[/]")
     console.print(table)
 
-    # Plex servers status
     servers = config.servers
     if servers:
         table = Table(title="Plex Servers")
@@ -440,7 +423,6 @@ def serve(host: str | None, port: int | None, tray: bool | None):
             old_log_path = get_config_dir() / "debug.log.1"
 
             if port_in_use:
-                # Separate file for conflicts - avoids race with running instance
                 conflict_log = get_config_dir() / "debug.conflict.log"
                 debug_log = open(conflict_log, "w")
             else:
@@ -463,7 +445,7 @@ def serve(host: str | None, port: int | None, tray: bool | None):
         except Exception:
             pass
 
-    # Kept open for process lifetime, intentionally not closed
+    # never closed: stdout and stderr write to it until exit
     _devnull = None
     if silent_mode:
         try:
@@ -529,7 +511,7 @@ def serve(host: str | None, port: int | None, tray: bool | None):
         except Exception as e:
             log(f"Exception: {e}")
 
-    # Handle port conflict after tray is ready (for notification)
+    # once the tray is up, the conflict can show as a notification
     if port_in_use:
         log("Attempting to show notification")
         if tray_instance and tray_instance._icon:
@@ -578,11 +560,9 @@ def serve(host: str | None, port: int | None, tray: bool | None):
         log(f"Starting uvicorn on {host}:{port}")
         uvi_log_level = "critical" if silent_mode else "warning"
 
-        # Use uvicorn.Config + Server for better control in pythonw environment
         uvi_config = uvicorn.Config(app, host=host, port=port, log_level=uvi_log_level)
         server = PaktServer(uvi_config)
 
-        # Notify on successful start
         if tray_instance and tray_instance._icon:
             try:
                 log("Sending startup notification")
@@ -620,7 +600,6 @@ def libraries(server: str | None, movie: tuple[str, ...], show: tuple[str, ...],
 
     config = Config.load()
 
-    # Find the target server
     if server:
         server_config = config.get_server(server)
         if not server_config:
@@ -635,7 +614,6 @@ def libraries(server: str | None, movie: tuple[str, ...], show: tuple[str, ...],
 
     console.print(f"[dim]Server: {server_config.name}[/]\n")
 
-    # Connect to Plex to get available libraries
     try:
         plex = PlexClient(server_config, account_token=config.plex_token)
         plex.connect()
@@ -646,7 +624,6 @@ def libraries(server: str | None, movie: tuple[str, ...], show: tuple[str, ...],
     available_movie_libs = plex.get_movie_libraries()
     available_show_libs = plex.get_show_libraries()
 
-    # If options provided, update config
     if movie or show or sync_all:
         if sync_all:
             server_config.movie_libraries = []
@@ -667,7 +644,6 @@ def libraries(server: str | None, movie: tuple[str, ...], show: tuple[str, ...],
         console.print("[green]✓[/] Configuration saved")
         console.print()
 
-    # Display current state
     table = Table(title="Plex Libraries")
     table.add_column("Type", style="cyan")
     table.add_column("Library")
@@ -787,14 +763,12 @@ def servers_add(name: str, url: str | None, server_token: str | None, disabled: 
 
     config = Config.load()
 
-    # Check if already exists
     if config.get_server(name):
         console.print(f"[yellow]Server '{name}' already configured.[/]")
         console.print("Use [cyan]pakt servers remove {name}[/] to remove it first.")
         return
 
     if url and server_token:
-        # Manual entry
         new_server = ServerConfig(
             name=name,
             url=url,
@@ -806,7 +780,6 @@ def servers_add(name: str, url: str | None, server_token: str | None, disabled: 
         console.print(f"[green]✓[/] Added server: {name}")
         return
 
-    # Try to find from discovered servers
     if not config.plex_token:
         console.print("[red]Error:[/] No account token. Provide --url and --token for manual entry.")
         return
@@ -818,7 +791,6 @@ def servers_add(name: str, url: str | None, server_token: str | None, disabled: 
         console.print(f"[red]Error discovering servers:[/] {e}")
         return
 
-    # Find matching server
     matching = None
     for server in discovered:
         if server.name.lower() == name.lower():
@@ -833,7 +805,6 @@ def servers_add(name: str, url: str | None, server_token: str | None, disabled: 
         console.print("\nOr use --url and --token for manual entry.")
         return
 
-    # Add the server
     new_server = ServerConfig(
         name=matching.name,
         server_name=matching.name,

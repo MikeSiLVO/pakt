@@ -57,7 +57,7 @@ def _disable_auto_reload(items: list) -> list:
 
 @dataclass
 class PlexPinAuth:
-    """Plex PIN authentication state."""
+    """The PIN a user enters at plex.tv/link, and its ID for polling."""
 
     pin: str
     pin_id: int
@@ -93,15 +93,12 @@ def start_plex_pin_login() -> tuple[MyPlexPinLogin, PlexPinAuth]:
 def check_plex_pin_login(login: MyPlexPinLogin) -> str | None:
     """Check if the PIN was approved; returns the account token, None while pending."""
     if login.checkLogin():
-        # The PIN login token may be temporary - exchange it for permanent token
-        # by creating a MyPlexAccount which fetches the account's auth token
+        # the PIN's token can be temporary; the account object carries the permanent one
         temp_token = login.token
         try:
             account = MyPlexAccount(token=temp_token)
-            # authenticationToken is the permanent account token
             return account.authenticationToken
         except Exception:
-            # Fall back to the PIN token if exchange fails
             return temp_token
     return None
 
@@ -112,9 +109,9 @@ class DiscoveredServer:
 
     name: str
     client_identifier: str
-    provides: str  # "server" for media servers
+    provides: str
     owned: bool
-    connections: list[dict]  # List of {uri, local, relay} dicts
+    connections: list[dict]  # {uri, local, relay} each
     access_token: str = ""
 
     @property
@@ -152,13 +149,12 @@ def _is_lan_url(url: str) -> bool:
 
 
 def discover_servers(account_token: str) -> list[DiscoveredServer]:
-    """Discover all Plex servers accessible with the given account token."""
+    """Discover the Plex servers the account can reach, with each one's own access token."""
     _identify()
     account = MyPlexAccount(token=account_token)
     servers = []
 
     for resource in account.resources():
-        # Only include actual servers
         if "server" not in resource.provides:
             continue
 
@@ -267,14 +263,14 @@ class PlexClient:
 
     @property
     def account(self) -> MyPlexAccount:
-        """Get MyPlex account for watchlist operations."""
+        """Get the plex.tv account for watchlist calls, signing in once."""
         if self._account is None:
             self._account = MyPlexAccount(token=self._account_token)
         return self._account
 
     @property
     def server(self) -> PlexServer:
-        """Connected server, dialling out on first use."""
+        """Connected server, dialing out on first use."""
         if not self._server:
             self.connect()
         if not self._server:
@@ -406,7 +402,6 @@ class PlexClient:
         return self.account.searchDiscover(query, libtype=libtype)
 
 
-# Resolution mapping: Plex videoResolution -> Trakt resolution
 RESOLUTION_MAP = {
     "4k": "uhd_4k",
     "1080": "hd_1080p",
@@ -416,7 +411,6 @@ RESOLUTION_MAP = {
     "sd": "sd_480p",
 }
 
-# Resolution ranking for scoring (higher = better)
 RESOLUTION_RANK = {
     "uhd_4k": 5,
     "hd_1080p": 4,
@@ -428,7 +422,6 @@ RESOLUTION_RANK = {
     "sd_480i": 1,
 }
 
-# HDR ranking (higher = better)
 HDR_RANK = {
     "dolby_vision": 4,
     "hdr10_plus": 3,
@@ -436,7 +429,6 @@ HDR_RANK = {
     "hlg": 1,
 }
 
-# Audio codec mapping: Plex audioCodec -> Trakt audio
 AUDIO_CODEC_MAP = {
     "truehd": "dolby_truehd",
     "eac3": "dolby_digital_plus",
@@ -455,7 +447,6 @@ AUDIO_CODEC_MAP = {
     "wma": "wma",
 }
 
-# Audio codec ranking (higher = better)
 AUDIO_RANK = {
     "dolby_atmos": 7,
     "dolby_digital_plus_atmos": 6,
@@ -472,7 +463,6 @@ AUDIO_RANK = {
     "mp3": 0,
 }
 
-# Channel count to Trakt format
 CHANNELS_MAP = {
     1: "1.0",
     2: "2.0",
@@ -512,15 +502,13 @@ def _detect_hdr_type(video_stream) -> str | None:
     if video_stream is None:
         return None
 
-    # Check for Dolby Vision
     if getattr(video_stream, "DOVIPresent", False):
         return "dolby_vision"
 
-    # Check colorTrc for HDR format
     color_trc = getattr(video_stream, "colorTrc", None)
     if color_trc:
         if color_trc == "smpte2084":
-            # Could be HDR10 or HDR10+ - check displayTitle for HDR10+
+            # HDR10 and HDR10+ share this transfer; only the title tells them apart
             display_title = getattr(video_stream, "displayTitle", "") or ""
             if "HDR10+" in display_title or "HDR10Plus" in display_title.replace(" ", ""):
                 return "hdr10_plus"
@@ -539,7 +527,6 @@ def _detect_audio_codec(media, audio_stream) -> str | None:
 
     codec = codec.lower()
 
-    # Check for Atmos in the audio stream
     if audio_stream:
         display_title = getattr(audio_stream, "displayTitle", "") or ""
         extended_display_title = getattr(audio_stream, "extendedDisplayTitle", "") or ""
@@ -554,23 +541,20 @@ def _detect_audio_codec(media, audio_stream) -> str | None:
         if "dts:x" in combined or "dts-x" in combined:
             return "dts_x"
 
-    # Fall back to standard codec mapping
     return AUDIO_CODEC_MAP.get(codec)
 
 
 def _detect_audio_channels(media, audio_stream) -> str | None:
-    """Detect audio channel configuration."""
+    """Detect audio channel layout, including Atmos and DTS:X height channels."""
     channels = getattr(media, "audioChannels", None)
     if not channels:
         return None
 
-    # Check for Atmos height channels in stream layout
     if audio_stream:
         channel_layout = getattr(audio_stream, "audioChannelLayout", "") or ""
         display_title = getattr(audio_stream, "displayTitle", "") or ""
         combined = f"{channel_layout} {display_title}".lower()
 
-        # Detect object-based audio with height channels
         if "atmos" in combined or "dts:x" in combined:
             if channels >= 8:
                 if "7.1.4" in combined:
@@ -585,33 +569,29 @@ def _detect_audio_channels(media, audio_stream) -> str | None:
                     return "5.1.2"
                 return "5.1"
 
-    # Standard channel mapping
     return CHANNELS_MAP.get(channels)
 
 
 def _score_media(media) -> int:
-    """Score a media version for quality comparison. Higher = better."""
+    """Score a media version for quality comparison, higher being better."""
     score = 0
 
-    # Resolution score (0-5000)
+    # weights keep resolution ahead of HDR, HDR ahead of audio, audio ahead of channels
     resolution = getattr(media, "videoResolution", None)
     if resolution:
         trakt_res = RESOLUTION_MAP.get(resolution.lower(), "sd_480p")
         score += RESOLUTION_RANK.get(trakt_res, 1) * 1000
 
-    # HDR score (0-400)
     video_stream = _get_video_stream(media)
     hdr_type = _detect_hdr_type(video_stream)
     if hdr_type:
         score += HDR_RANK.get(hdr_type, 0) * 100
 
-    # Audio score (0-70)
     audio_stream = _get_audio_stream(media)
     audio_codec = _detect_audio_codec(media, audio_stream)
     if audio_codec:
         score += AUDIO_RANK.get(audio_codec, 0) * 10
 
-    # Channels score (0-8)
     channels = getattr(media, "audioChannels", 0) or 0
     score += min(channels, 8)
 
@@ -641,26 +621,22 @@ def extract_media_metadata(item: Movie | Episode) -> dict:
 
     metadata: dict = {"media_type": "digital"}
 
-    # Resolution
     resolution = getattr(best_media, "videoResolution", None)
     if resolution:
         trakt_res = RESOLUTION_MAP.get(resolution.lower())
         if trakt_res:
             metadata["resolution"] = trakt_res
 
-    # HDR
     video_stream = _get_video_stream(best_media)
     hdr_type = _detect_hdr_type(video_stream)
     if hdr_type:
         metadata["hdr"] = hdr_type
 
-    # Audio codec
     audio_stream = _get_audio_stream(best_media)
     audio_codec = _detect_audio_codec(best_media, audio_stream)
     if audio_codec:
         metadata["audio"] = audio_codec
 
-    # Audio channels
     audio_channels = _detect_audio_channels(best_media, audio_stream)
     if audio_channels:
         metadata["audio_channels"] = audio_channels
@@ -672,7 +648,6 @@ def extract_plex_ids(item: Movie | Show | Episode) -> PlexIds:
     """Extract IDs from a Plex item, falling back to the legacy agent GUID when it lists none."""
     plex_id = PlexIds(plex=str(item.ratingKey), guid=item.guid)
 
-    # Parse GUIDs for external IDs
     for guid in getattr(item, "guids", []):
         guid_str = str(guid.id)
         if guid_str.startswith("imdb://"):

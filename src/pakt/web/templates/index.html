@@ -632,7 +632,6 @@
             </div>
         </header>
 
-        <!-- Setup Wizard -->
         <div id="wizard" class="wizard hidden">
             <div class="wizard-header">
                 <h2>Welcome to Pakt</h2>
@@ -651,7 +650,6 @@
                 </div>
             </div>
 
-            <!-- Step 1: Trakt -->
             <div id="step1" class="wizard-card">
                 <h3>Connect to Trakt</h3>
 
@@ -682,7 +680,6 @@
                 </div>
             </div>
 
-            <!-- Step 2: Plex -->
             <div id="step2" class="wizard-card hidden">
                 <h3>Connect to Plex</h3>
 
@@ -759,13 +756,10 @@
             </div>
         </div>
 
-        <!-- Main Dashboard -->
         <div id="dashboard" class="hidden">
 
-            <!-- SYNC VIEW -->
             <div id="view-sync" class="view-container active">
                 <div class="grid">
-                    <!-- Sync Actions -->
                     <div class="card">
                         <h2>Run Sync</h2>
                         <div class="card-content">
@@ -785,7 +779,6 @@
                         </div>
                     </div>
 
-                    <!-- Sync Options -->
                     <div class="card">
                         <h2>Default Sync Options</h2>
                         <div class="card-content">
@@ -829,7 +822,6 @@
                         </div>
                     </div>
 
-                    <!-- Console Output - full width -->
                     <div class="card" style="grid-column: 1 / -1;">
                         <h2 style="display: flex; justify-content: space-between; align-items: center;">
                             Console
@@ -863,7 +855,6 @@
                 </div>
             </div>
 
-            <!-- STATS VIEW -->
             <div id="view-stats" class="view-container">
                 <div class="card">
                     <h2>Last Sync Results</h2>
@@ -917,7 +908,6 @@
                 </div>
             </div>
 
-            <!-- SETTINGS VIEW -->
             <div id="view-settings" class="view-container">
                 <div class="grid">
                     <div class="card">
@@ -954,7 +944,6 @@
                         </div>
                     </div>
 
-                    <!-- Servers - full width -->
                     <div class="card" style="grid-column: 1 / -1;">
                         <h2>Servers</h2>
                         <div class="card-content">
@@ -976,7 +965,6 @@
                         </div>
                     </div>
 
-                    <!-- Scheduler - full width -->
                     <div class="card" style="grid-column: 1 / -1;">
                         <h2>Scheduler</h2>
                         <div class="card-content">
@@ -1001,7 +989,6 @@
                         </div>
                     </div>
 
-                    <!-- Per-Server Settings - full width -->
                     <div class="card" style="grid-column: 1 / -1;">
                         <h2>Server Settings</h2>
                         <div class="card-content">
@@ -1018,7 +1005,6 @@
 
         </div>
 
-        <!-- Reconfigure Modal -->
         <div id="reconfigure-modal" class="modal-overlay hidden">
             <div class="modal">
                 <h3>Reconfigure Connections</h3>
@@ -1038,16 +1024,14 @@
         let isConfigured = false;
         let syncPolling = false;
         let currentView = 'sync';
-        let wizardInProgress = false;  // Prevents auto-switch to dashboard during setup
+        let wizardInProgress = false;  // keeps setup on screen instead of switching to the dashboard
 
         function showView(viewName) {
             currentView = viewName;
 
-            // Update view containers
             document.querySelectorAll('.view-container').forEach(v => v.classList.remove('active'));
             document.getElementById('view-' + viewName).classList.add('active');
 
-            // Update nav tabs
             document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
             document.querySelectorAll('.nav-tab').forEach(t => {
                 if (t.textContent.toLowerCase() === viewName) {
@@ -1055,7 +1039,7 @@
                 }
             });
 
-            // Settings is accessed via icon, not tab
+            // settings opens from its icon, not a tab
             if (viewName === 'settings') {
                 document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
                 loadLibraries();
@@ -1070,19 +1054,17 @@
 
                 isConfigured = data.trakt_authenticated && data.plex_configured;
 
-                // Update badge and sync UI state
                 const badge = document.getElementById('status-badge');
                 if (data.sync_running) {
                     badge.textContent = 'Syncing...';
                     badge.className = 'status-badge running';
-                    // Resume sync UI state after page refresh
+                    // a reload mid-sync picks the running sync back up
                     document.getElementById('sync-btn').disabled = true;
                     document.getElementById('sync-btn').textContent = 'Syncing...';
                     document.getElementById('dry-run-btn').classList.add('hidden');
                     document.getElementById('cancel-btn').classList.remove('hidden');
                     document.getElementById('verbose-logging').disabled = true;
                     document.getElementById('progress-container').classList.remove('hidden');
-                    // Start polling if not already
                     if (!syncPolling) {
                         syncPolling = true;
                         pollSyncStatus();
@@ -1095,7 +1077,6 @@
                     badge.className = 'status-badge error';
                 }
 
-                // Show wizard or dashboard
                 if (isConfigured && !wizardInProgress) {
                     document.getElementById('wizard').classList.add('hidden');
                     document.getElementById('dashboard').classList.remove('hidden');
@@ -1108,22 +1089,18 @@
                     document.getElementById('main-nav').classList.add('hidden');
                     document.getElementById('settings-btn').classList.add('hidden');
 
-                    // Determine which step
                     if (data.trakt_authenticated) {
                         goToStep2();
                     }
                 }
 
-                // Update dashboard values
                 if (isConfigured) {
                     document.getElementById('trakt-status').textContent = 'Connected';
                     document.getElementById('trakt-status').className = 'value success';
                     document.getElementById('plex-status').textContent = 'Connected';
                     document.getElementById('plex-status').className = 'value success';
 
-                    // Load Trakt account info
                     loadTraktAccount();
-                    // Load Plex server info
                     loadPlexServer();
 
                     if (data.last_run) {
@@ -1162,7 +1139,6 @@
             }
         }
 
-        // Wizard functions
         async function startTraktAuth() {
             document.getElementById('step1-start').classList.add('hidden');
             document.getElementById('step1-auth').classList.remove('hidden');
@@ -1182,7 +1158,6 @@
                 document.getElementById('auth-url').textContent = data.verification_url;
                 document.getElementById('auth-code').textContent = data.user_code;
 
-                // Poll for completion
                 const pollAuth = async () => {
                     const pollResp = await fetch('/api/trakt/auth/poll', {method: 'POST'});
                     const pollData = await pollResp.json();
@@ -1214,13 +1189,11 @@
             document.getElementById('step1-indicator').classList.add('done');
             document.getElementById('step2-indicator').classList.add('active');
 
-            // Check if already configured
             tryDetectPlex();
         }
 
         async function tryDetectPlex() {
             try {
-                // Check if servers are configured
                 const serversResp = await fetch('/api/servers');
                 const serversData = await serversResp.json();
                 if (serversData.servers && serversData.servers.length > 0) {
@@ -1231,7 +1204,6 @@
                     return;
                 }
 
-                // Check legacy config
                 const resp = await fetch('/api/plex/test', {method: 'POST'});
                 const data = await resp.json();
                 if (data.status === 'ok') {
@@ -1241,7 +1213,6 @@
                         `Connected to ${data.server_name}`;
                 }
             } catch (e) {
-                // Not configured, show start screen
             }
         }
 
@@ -1266,7 +1237,6 @@
                 document.getElementById('plex-auth-code').textContent = data.pin;
                 plexPinId = data.pin_id;
 
-                // Poll for completion
                 pollPlexAuth();
             } catch (e) {
                 alert('Error: ' + e.message);
@@ -1283,7 +1253,6 @@
                 const data = await resp.json();
 
                 if (data.status === 'authenticated') {
-                    // Success - discover servers
                     document.getElementById('step2-auth').classList.add('hidden');
                     await discoverServers();
                 } else if (data.status === 'pending') {
@@ -1304,7 +1273,6 @@
                 const data = await resp.json();
 
                 if (data.status !== 'ok' || !data.servers || data.servers.length === 0) {
-                    // No servers found, go straight to done
                     document.getElementById('step2-done').classList.remove('hidden');
                     document.getElementById('plex-setup-result').textContent = 'Plex account linked (no servers found)';
                     return;
@@ -1337,7 +1305,6 @@
                 selected.push(el.dataset.server);
             });
 
-            // Add each selected server
             for (const serverName of selected) {
                 try {
                     await fetch('/api/servers', {
@@ -1370,13 +1337,11 @@
             let url = document.getElementById('plex-url').value.trim();
             let token = document.getElementById('plex-token').value.trim();
 
-            // Default URL if empty
             if (!url) {
                 url = 'http://localhost:32400';
                 document.getElementById('plex-url').value = url;
             }
 
-            // Auto-strip common prefixes if user pasted the whole thing
             if (token.toLowerCase().startsWith('x-plex-token=')) {
                 token = token.substring(13);
             } else if (token.startsWith('=')) {
@@ -1392,7 +1357,6 @@
             resultBox.classList.remove('hidden');
             resultBox.textContent = 'Testing connection...';
 
-            // Save first
             await fetch('/api/config', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
@@ -1402,7 +1366,6 @@
                 })
             });
 
-            // Test
             const resp = await fetch('/api/plex/test', {method: 'POST'});
             const data = await resp.json();
 
@@ -1444,7 +1407,6 @@
             document.getElementById('main-nav').classList.add('hidden');
             document.getElementById('settings-btn').classList.add('hidden');
 
-            // Reset wizard state
             document.getElementById('step1').classList.remove('hidden');
             document.getElementById('step2').classList.add('hidden');
             document.getElementById('step1-start').classList.remove('hidden');
@@ -1457,7 +1419,6 @@
             document.getElementById('step2-indicator').classList.remove('active');
         }
 
-        // Console management
         let consoleDetailsVisible = false;
         let consoleLogs = [];
         let consoleDetails = [];
@@ -1489,7 +1450,7 @@
             document.getElementById('progress-phase').textContent = 'Phase ' + phase + '/4';
             const activityEl = document.getElementById('progress-activity');
 
-            // Parse task progress from labels like "Movies 500/9068" or "Episodes 1000/51505"
+            // labels look like "Movies 500/9068"
             const taskMatch = activity ? activity.match(/^(\w+)\s+(\d+)\/(\d+)$/) : null;
             const taskContainer = document.getElementById('task-progress-container');
 
@@ -1499,21 +1460,17 @@
                 const total = parseInt(taskMatch[3]);
                 const taskPercent = total > 0 ? (current / total) * 100 : 0;
 
-                // Show task progress bar
                 taskContainer.classList.remove('hidden');
                 document.getElementById('task-activity').textContent = `${taskName} ${current.toLocaleString()} / ${total.toLocaleString()}`;
                 document.getElementById('task-percent').textContent = Math.round(taskPercent) + '%';
                 document.getElementById('task-progress-fill').style.width = taskPercent + '%';
 
-                // Main activity shows phase description
                 activityEl.textContent = `Processing ${taskName.toLowerCase()}`;
             } else {
-                // Hide task progress bar when not processing items
                 taskContainer.classList.add('hidden');
                 activityEl.textContent = activity || '';
             }
 
-            // Add pulsing animation during fetch operations
             const isFetching = activity && (activity.includes('Fetching') || activity.includes('Trakt') || activity.includes('Plex')) && !activity.includes('complete');
             if (isFetching) {
                 activityEl.classList.add('fetching');
@@ -1568,8 +1525,7 @@
         }
 
         function escapeHtml(text) {
-            // textContent alone leaves both quote characters intact, which breaks
-            // any attribute this lands in (server names can contain them).
+            // textContent leaves quotes intact, which breaks any attribute a server name lands in
             return String(text ?? '')
                 .replace(/&/g, '&amp;')
                 .replace(/</g, '&lt;')
@@ -1578,7 +1534,6 @@
                 .replace(/'/g, '&#39;');
         }
 
-        // Dashboard functions
         async function startSync(dryRun) {
             const btn = document.getElementById('sync-btn');
             const dryBtn = document.getElementById('dry-run-btn');
@@ -1644,13 +1599,13 @@
                 const resp = await fetch('/api/sync/status?since=' + lastServerLogIndex + '&_=' + Date.now());
                 const data = await resp.json();
 
-                // Server already sliced from lastServerLogIndex, so these are all new
+                // the server slices from lastServerLogIndex; every line here is new
                 if (data.logs && data.logs.length) {
                     const newLogs = data.logs;
                     lastServerLogIndex = data.log_count ?? (lastServerLogIndex + newLogs.length);
                     newLogs.forEach(log => {
                         if (log.startsWith('PROGRESS:')) {
-                            // Format: PROGRESS:phase:percent:label
+                            // PROGRESS:phase:percent:label
                             const parts = log.substring(9).split(':');
                             showProgress(parseInt(parts[0]), parseFloat(parts[1]), parts[2] || null);
                         } else if (log.startsWith('DETAIL:')) {
@@ -1677,7 +1632,7 @@
 
                     if (data.last_result) {
                         if (data.last_result.cancelled) {
-                            // Already logged via WARNING message
+                            // the WARNING line already logged it
                         } else if (data.last_result.error) {
                             logToConsole(data.last_result.error, 'error');
                         } else {
@@ -1776,7 +1731,6 @@
                     const statusClass = server.enabled ? 'success' : 'warning';
                     const statusText = server.enabled ? 'Enabled' : 'Disabled';
 
-                    // Try to get library counts
                     let movieCount = '-';
                     let showCount = '-';
                     try {
@@ -1785,7 +1739,7 @@
                         if (libData.status === 'ok') {
                             const movieTotal = libData.available.movie.length;
                             const showTotal = libData.available.show.length;
-                            // Empty selected = all enabled
+                            // an empty selection syncs every library
                             const movieEnabled = libData.selected.movie.length === 0 ? movieTotal : libData.selected.movie.length;
                             const showEnabled = libData.selected.show.length === 0 ? showTotal : libData.selected.show.length;
 
@@ -1819,7 +1773,6 @@
                         </div>
                     </div>`;
                 }
-                // Remove last border
                 container.innerHTML = html.replace(/border-bottom: 1px solid var\(--border\);">([^<]*<\/div>\s*)$/, '">$1');
             } catch (e) {
                 container.innerHTML = '<span style="color: var(--error);">Error loading servers</span>';
@@ -1827,7 +1780,6 @@
             }
         }
 
-        // Server management
         let settingsPinId = null;
 
         async function refreshServersInSettings() {
@@ -1865,7 +1817,7 @@
                     </div>`;
                 }).join('');
 
-                // Wired here, not inline: a handler attribute decodes the escaped name back into script
+                // wired here, not inline: a handler attribute decodes the escaped name back into script
                 container.querySelectorAll('button[data-action]').forEach(btn => {
                     const name = btn.dataset.server;
                     if (btn.dataset.action === 'toggle') {
@@ -1926,7 +1878,6 @@
                 if (data.status === 'authenticated') {
                     document.getElementById('servers-reauth').classList.add('hidden');
                     settingsPinId = null;
-                    // Discover and add servers
                     await discoverAndAddServers();
                 } else if (data.status === 'pending') {
                     setTimeout(pollSettingsPlexAuth, 2000);
@@ -1945,7 +1896,6 @@
                 const data = await resp.json();
 
                 if (data.status === 'ok' && data.servers) {
-                    // Add any new servers
                     for (const server of data.servers) {
                         if (!server.configured) {
                             await fetch('/api/servers', {
@@ -1962,7 +1912,6 @@
             }
         }
 
-        // Library and sync options (per-server)
         let serverData = {};  // {serverName: {libraries, sync, enabled}}
         let globalSync = {};
 
@@ -1976,7 +1925,6 @@
             error.classList.add('hidden');
 
             try {
-                // Get list of servers with sync options
                 const serversResp = await fetch('/api/servers');
                 const serversResult = await serversResp.json();
 
@@ -1989,7 +1937,6 @@
 
                 globalSync = serversResult.global_sync || {};
 
-                // Load libraries for each server
                 serverData = {};
                 for (const server of serversResult.servers) {
                     try {
@@ -2100,10 +2047,9 @@
         function renderSyncOption(serverName, option, label, serverSync) {
             const safeServer = escapeHtml(serverName);
             const globalVal = globalSync[option] ?? false;
-            const serverVal = serverSync[option];  // null = use global
+            const serverVal = serverSync[option];  // null uses the global setting
             const globalLabel = globalVal ? 'On' : 'Off';
 
-            // tri-state: null (global), true, false
             let selectHtml = `<select data-server="${safeServer}" data-sync="${option}" style="padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.8rem;">`;
             selectHtml += `<option value="null" ${serverVal === null || serverVal === undefined ? 'selected' : ''}>Global (${globalLabel})</option>`;
             selectHtml += `<option value="true" ${serverVal === true ? 'selected' : ''}>On</option>`;
@@ -2125,7 +2071,6 @@
 
             const data = serverData[serverName];
 
-            // Collect library selections
             const movieLibs = [];
             const showLibs = [];
             document.querySelectorAll(`input[data-server="${CSS.escape(serverName)}"][data-type="movie"]:checked`).forEach(el => {
@@ -2137,7 +2082,6 @@
             const allMovies = movieLibs.length === data.available.movie.length;
             const allShows = showLibs.length === data.available.show.length;
 
-            // Collect sync overrides
             const syncOverrides = {};
             document.querySelectorAll(`select[data-server="${CSS.escape(serverName)}"][data-sync]`).forEach(el => {
                 const opt = el.dataset.sync;
@@ -2155,7 +2099,6 @@
                 })
             });
 
-            // Update local state
             data.selected.movie = allMovies ? [] : movieLibs;
             data.selected.show = allShows ? [] : showLibs;
             data.sync = syncOverrides;
@@ -2176,12 +2119,11 @@
                 await fetch('/api/shutdown', {method: 'POST'});
                 document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:1rem;"><h1 style="color:#2dd4bf;">Pakt</h1><p style="color:#888;">Server stopped. You can close this tab.</p></div>';
             } catch (e) {
-                // Server already stopped
+                // the server is already gone
                 document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;flex-direction:column;gap:1rem;"><h1 style="color:#2dd4bf;">Pakt</h1><p style="color:#888;">Server stopped. You can close this tab.</p></div>';
             }
         }
 
-        // Render server settings from init data (no additional fetches)
         function renderServersFromInit(servers, globalSyncConfig) {
             globalSync = globalSyncConfig || {};
             serverData = {};
@@ -2199,7 +2141,6 @@
             renderServerSettings();
         }
 
-        // Render Plex servers stats from init data (no additional fetches)
         function renderPlexServersStats(servers) {
             const container = document.getElementById('plex-servers-stats');
             if (!container) return;
@@ -2220,7 +2161,7 @@
                 const movieSelected = (server.movie_libraries || []).length;
                 const showSelected = (server.show_libraries || []).length;
 
-                // Empty selected = all enabled
+                // an empty selection syncs every library
                 const movieEnabled = movieSelected === 0 ? movieTotal : movieSelected;
                 const showEnabled = showSelected === 0 ? showTotal : showSelected;
 
@@ -2250,17 +2191,14 @@
                     </div>
                 </div>`;
             }
-            // Remove last border
             container.innerHTML = html.replace(/border-bottom: 1px solid var\(--border\);">([^<]*<\/div>\s*)$/, '">$1');
         }
 
-        // Fast initial load using single combined endpoint
         (async function initialLoad() {
             try {
                 const resp = await fetch('/api/init');
                 const data = await resp.json();
 
-                // Apply status
                 isConfigured = data.status.trakt_authenticated && data.status.plex_configured;
                 const badge = document.getElementById('status-badge');
 
@@ -2285,14 +2223,12 @@
                     badge.className = 'status-badge error';
                 }
 
-                // Show wizard or dashboard
                 if (isConfigured) {
                     document.getElementById('wizard').classList.add('hidden');
                     document.getElementById('dashboard').classList.remove('hidden');
                     document.getElementById('main-nav').classList.remove('hidden');
                     document.getElementById('settings-btn').classList.remove('hidden');
 
-                    // Apply config
                     const sync = data.config.sync;
                     document.getElementById('watched-plex-to-trakt').checked = sync.watched_plex_to_trakt;
                     document.getElementById('watched-trakt-to-plex').checked = sync.watched_trakt_to_plex;
@@ -2302,25 +2238,21 @@
                     document.getElementById('watchlist-plex-to-trakt').checked = sync.watchlist_plex_to_trakt;
                     document.getElementById('watchlist-trakt-to-plex').checked = sync.watchlist_trakt_to_plex;
 
-                    // Apply scheduler
                     const schedEnabledEl = document.getElementById('scheduler-enabled');
                     const schedIntervalEl = document.getElementById('scheduler-interval');
                     if (schedEnabledEl) schedEnabledEl.checked = data.config.scheduler.enabled;
                     if (schedIntervalEl) schedIntervalEl.value = data.config.scheduler.interval_hours;
 
-                    // Apply Trakt account
                     if (data.trakt_account && data.trakt_account.status === 'ok') {
                         document.getElementById('trakt-status').textContent = data.trakt_account.is_vip ? 'VIP' : 'Free';
                         document.getElementById('trakt-status').className = 'value success';
                     }
 
-                    // Render servers with libraries (from init data)
                     if (data.servers && data.servers.length > 0) {
                         renderServersFromInit(data.servers, data.config.sync);
                         renderPlexServersStats(data.servers);
                     }
 
-                    // Apply last sync info
                     if (data.status.last_run) {
                         document.getElementById('last-run').textContent = new Date(data.status.last_run).toLocaleString();
                     }
@@ -2336,7 +2268,7 @@
                 }
             } catch (e) {
                 console.error('Init failed:', e);
-                // Fall back to old method
+                // /api/init failed; load the parts one by one
                 loadStatus();
                 loadConfig();
             }

@@ -21,7 +21,6 @@ from pakt import __version__
 from pakt.config import Config, ServerConfig, get_config_dir
 from pakt.sync import run_multi_server_sync
 
-# Global state for sync status
 sync_state = {
     "running": False,
     "cancelled": False,
@@ -30,13 +29,12 @@ sync_state = {
     "logs": [],
 }
 
-# Global scheduler instance
 _scheduler = None
 
-# Cache for expensive API calls (Trakt account, Plex libraries)
+# Trakt account and Plex library lookups are slow to repeat on every page load
 _cache: dict[str, tuple[float, Any]] = {}
-CACHE_TTL = 300  # 5 minutes
-CONFIG_CACHE_TTL = 2  # 2 seconds for config (avoids repeated disk reads during page load)
+CACHE_TTL = 300
+CONFIG_CACHE_TTL = 2  # one page load reads config many times
 
 _config_cache: tuple[float, Config | None] = (0, None)
 
@@ -51,7 +49,7 @@ def get_cached(key: str) -> Any | None:
 
 
 def set_cached(key: str, value: Any) -> None:
-    """Cache a value."""
+    """Cache a value with the current time, for get_cached to expire."""
     _cache[key] = (time.time(), value)
 
 
@@ -114,7 +112,7 @@ class ConfigUpdate(BaseModel):
 
 
 class SyncRequest(BaseModel):
-    """Sync request options."""
+    """Options for a sync started over the API."""
 
     dry_run: bool = False
     verbose: bool = False
@@ -122,7 +120,7 @@ class SyncRequest(BaseModel):
     collection_only: bool = False
     no_movies: bool = False
     no_shows: bool = False
-    servers: list[str] | None = None  # Optional list of server names to sync
+    servers: list[str] | None = None  # None syncs every enabled server
 
 
 class SyncOverrideUpdate(BaseModel):
@@ -195,24 +193,21 @@ async def _scheduled_sync() -> None:
         sync_state["cancelled"] = False
 
 
+def _start_scheduler(config: Config) -> None:
+    """Start the sync scheduler from config, keeping it in the module's _scheduler."""
+    global _scheduler
+    from pakt.scheduler import SyncScheduler
+
+    _scheduler = SyncScheduler(config, sync_func=_scheduled_sync, is_running_func=lambda: sync_state["running"])
+    _scheduler.start()
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan handler."""
-    global _scheduler
-
+    """Start the scheduler with the app when config enables it, and stop it on shutdown."""
     config = Config.load()
     if config.scheduler.enabled and config.scheduler.interval_hours > 0:
-        try:
-            from pakt.scheduler import SyncScheduler
-
-            _scheduler = SyncScheduler(
-                config,
-                sync_func=_scheduled_sync,
-                is_running_func=lambda: sync_state["running"],
-            )
-            _scheduler.start()
-        except ImportError:
-            pass  # APScheduler not installed
+        _start_scheduler(config)
 
     yield
 
@@ -472,7 +467,6 @@ def create_app() -> FastAPI:
         config.save()
         invalidate_config_cache()
 
-        global _scheduler
         if update.scheduler_enabled is not None or update.scheduler_interval_hours is not None:
             if _scheduler:
                 _scheduler.update_config(
@@ -480,28 +474,17 @@ def create_app() -> FastAPI:
                     config.scheduler.interval_hours,
                 )
             elif config.scheduler.enabled and config.scheduler.interval_hours > 0:
-                try:
-                    from pakt.scheduler import SyncScheduler
-
-                    _scheduler = SyncScheduler(
-                        config,
-                        sync_func=_scheduled_sync,
-                        is_running_func=lambda: sync_state["running"],
-                    )
-                    _scheduler.start()
-                except ImportError:
-                    pass
+                _start_scheduler(config)
 
         return {"status": "ok"}
 
     @app.post("/api/sync")
     async def start_sync(request: SyncRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
-        """Start a sync operation."""
+        """Start a sync in the background, refusing while one is already running."""
         if sync_state["running"]:
             return {"status": "error", "message": "Sync already running"}
 
-        # Claim the slot here, not in do_sync: background tasks run after the
-        # response is sent, so two requests would both get past the check.
+        # claim it now; a background task starts after the response, past a second request's check
         sync_state["running"] = True
         sync_state["cancelled"] = False
         sync_state["logs"] = []
@@ -607,8 +590,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/scheduler/status")
     async def get_scheduler_status() -> dict[str, Any]:
-        """Get scheduler status."""
-        global _scheduler
+        """Get scheduler status, from config alone when no scheduler has started."""
         config = Config.load()
         if _scheduler:
             return _scheduler.get_status()
@@ -762,9 +744,8 @@ def create_app() -> FastAPI:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    # Store active PIN logins (pin_id -> (timestamp, login object))
     _plex_pin_logins: dict[int, tuple[float, Any]] = {}
-    _PIN_MAX_AGE = 600  # 10 minutes (matches Plex PIN expiry)
+    _PIN_MAX_AGE = 600  # Plex PINs expire after 10 minutes
 
     def _cleanup_expired_pins() -> None:
         """Remove PIN logins older than max age."""
@@ -931,7 +912,7 @@ def create_app() -> FastAPI:
 
     @app.put("/api/servers/{name}")
     async def update_server(name: str, request: ServerUpdate) -> dict[str, Any]:
-        """Update server configuration."""
+        """Update a server's enabled flag, libraries and sync overrides."""
         from pakt.config import ServerSyncOverrides
 
         config = Config.load()
@@ -947,7 +928,6 @@ def create_app() -> FastAPI:
         if request.show_libraries is not None:
             server.show_libraries = request.show_libraries
         if request.sync is not None:
-            # Update sync overrides
             if server.sync is None:
                 server.sync = ServerSyncOverrides()
             for field in [
@@ -957,7 +937,7 @@ def create_app() -> FastAPI:
                 "watchlist_plex_to_trakt", "watchlist_trakt_to_plex",
             ]:
                 val = getattr(request.sync, field, None)
-                # Allow explicit None to clear override (use global)
+                # None clears the override back to the global setting
                 setattr(server.sync, field, val)
 
         config.save()
@@ -1002,7 +982,7 @@ def create_app() -> FastAPI:
 
     @app.get("/api/servers/{name}/libraries")
     def get_server_libraries(name: str) -> dict[str, Any]:
-        """Get libraries for a specific server."""
+        """Get a server's available libraries and the ones selected to sync."""
         from pakt.plex import PlexClient
 
         config = Config.load()
@@ -1011,7 +991,7 @@ def create_app() -> FastAPI:
         if not server:
             return {"status": "error", "message": f"Server '{name}' not found"}
 
-        # Check cache for available libraries (selected comes from config)
+        # only the available list is cached; the selection always comes from config
         cache_key = f"plex_libraries_{name}"
         cached_available = get_cached(cache_key)
 

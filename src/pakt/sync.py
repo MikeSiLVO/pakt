@@ -403,19 +403,19 @@ class SyncEngine:
                 if name != "rating_priority"}
 
     def _get_movie_libraries(self) -> list[str] | None:
-        """Get movie libraries to sync (server-specific or global)."""
+        """Get the server's movie libraries to sync, or None for all of them."""
         if self._server_config and self._server_config.movie_libraries:
             return self._server_config.movie_libraries
         return None
 
     def _get_show_libraries(self) -> list[str] | None:
-        """Get show libraries to sync (server-specific or global)."""
+        """Get the server's show libraries to sync, or None for all of them."""
         if self._server_config and self._server_config.show_libraries:
             return self._server_config.show_libraries
         return None
 
     def _is_cancelled(self) -> bool:
-        """Check if sync has been cancelled."""
+        """Whether the caller has asked to cancel."""
         return self._cancel_check() if self._cancel_check else False
 
     def _log(self, msg: str) -> None:
@@ -425,7 +425,7 @@ class SyncEngine:
         _emit(msg, self._log_callback)
 
     def _progress(self, phase: int, total_phases: int, percent: float, label: str = "") -> None:
-        """Send progress update to callback and log."""
+        """Send a progress line to the callback, as a share of the whole run."""
         phase_weight = 100 / total_phases
         overall = ((phase - 1) * phase_weight) + (percent / 100 * phase_weight)
         if self._log_callback:
