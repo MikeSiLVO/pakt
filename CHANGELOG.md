@@ -1,6 +1,11 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.0] - 2026-10-25
+
+### Before you upgrade
+- **Docker** - Mount the config volume at `/home/pakt/.config/pakt` instead of `/root/.config/pakt`, and set a web UI password with `docker-compose run --rm pakt pakt password`. The web UI is published on `localhost` only; the Docker guide shows how to open it to your network
+- **Opening the web UI from another device** now asks for a password. Set one with `pakt password`
+- **Opening the web UI by a host name** other than `localhost` or an IP address needs that name in `web.allowed_hosts`
 
 ### Added
 - **Web UI login for other devices** - Set a password with `pakt password`. The same machine still opens the web UI without one; other devices, Docker and reverse proxies need it, and are refused until one is set
@@ -50,7 +55,7 @@
 
 ### Changed
 - **Faster syncs and CLI startup**
-- **Docker** - The container runs as an unprivileged user on a read-only filesystem, and the web UI is published on `localhost` only. Mount the config volume at `/home/pakt/.config/pakt`; the container stops with a message while it is still at `/root/.config/pakt`. See the Docker guide to publish the port on your network
+- **Docker** - The container runs as an unprivileged user on a read-only filesystem, and stops with a message while the config volume is still mounted at `/root/.config/pakt`
 - **Trakt login uses `auth.trakt.tv`** - Trakt stops accepting logins through other hosts on 1 February 2027
 - **Trakt requests identify as `pakt/<version>`**, and Plex requests as Pakt with a device ID kept in config.json
 - **Trakt rate limits** - Writes are spaced one second apart, and retries without a `Retry-After` header back off with jitter. Locked accounts and refused API keys get their own messages
