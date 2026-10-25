@@ -64,7 +64,11 @@ ports:
   - "7258:7258"
 ```
 
-The web UI has no login, so anyone who can reach the port can use it.
+Set a password first; the web UI stays closed until one is set:
+
+```bash
+docker-compose run --rm pakt pakt password
+```
 
 To use another port:
 

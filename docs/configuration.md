@@ -67,6 +67,8 @@ Web server settings for `pakt serve`.
 |-------|------|---------|-------------|
 | `host` | string | `"127.0.0.1"` | IP address to bind to. Use `"0.0.0.0"` to allow external access. |
 | `port` | integer | `7258` | Port number. Default is "PAKT" on phone keypad. |
+| `password_hash` | string | `""` | Hash of the web UI password. Set it with `pakt password`. |
+| `session_secret` | string | `""` | Signs login sessions. `pakt password` replaces it, which logs out every device. |
 | `allowed_hosts` | list | `[]` | Host names the web UI answers to besides `localhost` and IP addresses, such as a reverse proxy domain. Any other name gets a 403. |
 
 ---
@@ -216,6 +218,6 @@ To access the web UI from other devices:
 
 Then access via your machine's IP address.
 
-The web UI has no login. Anyone who can reach the port can change settings, remove servers, revoke
-your Trakt token, or stop the server. Only bind `0.0.0.0` on a network you trust, or put it behind a
-reverse proxy that handles authentication.
+From another device the web UI asks for the password set with `pakt password`, and stays closed
+until one is set. On the same machine it opens without one, except through a reverse proxy or Docker.
+The password travels in plain HTTP unless a reverse proxy adds HTTPS.

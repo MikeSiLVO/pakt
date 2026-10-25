@@ -180,7 +180,16 @@ Or in config.json:
 }
 ```
 
-Then access via `http://YOUR_IP:7258`
+Then access via `http://YOUR_IP:7258`, and set the password it asks for with `pakt password`.
+
+---
+
+### "Set a password before opening Pakt from another device"
+
+**Cause:** The web UI was opened from another device and no password is set.
+
+**Solution:** Run `pakt password` on the machine running Pakt (in Docker,
+`docker-compose run --rm pakt pakt password`), then reload the page.
 
 ---
 

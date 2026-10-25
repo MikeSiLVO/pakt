@@ -10,16 +10,28 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from fastapi import BackgroundTasks, FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
 from pakt import __version__
 from pakt.config import Config, ServerConfig, get_config_dir
 from pakt.sync import run_multi_server_sync
+from pakt.web.auth import (
+    SESSION_COOKIE,
+    SESSION_SECONDS,
+    LoginThrottle,
+    check_password,
+    is_local,
+    make_session,
+    session_valid,
+)
+
+PUBLIC_PATHS = ("/login", "/favicon.ico", "/assets/")
+MAX_LOGIN_BODY = 4096
 
 sync_state = {
     "running": False,
@@ -216,7 +228,7 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    """Create the FastAPI application with its host and origin checks and all routes."""
+    """Create the FastAPI application with its host, origin and login checks and all routes."""
     app = FastAPI(
         title="Pakt",
         description="Plex-Trakt sync",
@@ -229,9 +241,10 @@ def create_app() -> FastAPI:
 
     @app.middleware("http")
     async def reject_foreign_requests(request: Request, call_next):
-        """Reject DNS-rebound hosts and cross-site writes, and forbid framing of every response."""
+        """Reject rebound hosts and cross-site writes, require remote logins, and block framing."""
         host = request.headers.get("host", "")
-        allowed_hosts = [h.lower() for h in load_config_cached().web.allowed_hosts]
+        web = load_config_cached().web
+        allowed_hosts = [h.lower() for h in web.allowed_hosts]
         if not _host_allowed(host, allowed_hosts):
             return PlainTextResponse(
                 f"Host '{host}' is not allowed. Add it to web.allowed_hosts in config.json.", status_code=403
@@ -244,6 +257,13 @@ def create_app() -> FastAPI:
                     f"Request from '{origin}' refused. Add its host name to web.allowed_hosts in config.json.",
                     status_code=403,
                 )
+        request.state.local = is_local(request.client.host if request.client else None, host, request.headers)
+        path = request.url.path
+        if not request.state.local and not path.startswith(PUBLIC_PATHS):
+            if not session_valid(request.cookies.get(SESSION_COOKIE, ""), web.session_secret, web.password_hash):
+                if path.startswith("/api/"):
+                    return JSONResponse({"detail": "Log in first"}, status_code=401)
+                return RedirectResponse("/login", status_code=303)
         response = await call_next(request)
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
@@ -276,7 +296,7 @@ def create_app() -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def index(request: Request):
-        """Main dashboard."""
+        """Render the main dashboard."""
         config = Config.load()
         return templates.TemplateResponse(
             request,
@@ -286,8 +306,55 @@ def create_app() -> FastAPI:
                 "sync_state": sync_state,
                 "config_dir": str(get_config_dir()),
                 "version": __version__,
+                "remote": not request.state.local,
             },
         )
+
+    throttle = LoginThrottle()
+
+    def login_page(request: Request, error: str | None = None, status_code: int = 200) -> HTMLResponse:
+        """Render the login form, or the steps to set a password when none is set."""
+        web = load_config_cached().web
+        context = {"password_set": bool(web.password_hash and web.session_secret), "error": error}
+        return templates.TemplateResponse(request, "login.html", context, status_code=status_code)
+
+    @app.get("/login", response_class=HTMLResponse)
+    async def show_login(request: Request):
+        """Show the login page to a visitor from another device."""
+        if request.state.local:
+            return RedirectResponse("/", status_code=303)
+        return login_page(request)
+
+    @app.post("/login")
+    async def login(request: Request):
+        """Check the password and start a session, locking an address out after repeated misses."""
+        web = Config.load().web
+        address = request.client.host if request.client else ""
+        if not (web.password_hash and web.session_secret):
+            return login_page(request, status_code=403)
+        if throttle.locked(address):
+            return login_page(request, "Too many attempts. Wait a minute and try again.", 429)
+        if int(request.headers.get("content-length") or 0) > MAX_LOGIN_BODY:
+            return login_page(request, "Request too large.", 413)
+        form = parse_qs((await request.body()).decode(errors="replace"))
+        if not await asyncio.to_thread(check_password, form.get("password", [""])[0], web.password_hash):
+            throttle.record_failure(address)
+            return login_page(request, "Wrong password.", 401)
+        throttle.clear(address)
+        response = RedirectResponse("/", status_code=303)
+        response.set_cookie(
+            SESSION_COOKIE, make_session(web.session_secret, web.password_hash), max_age=SESSION_SECONDS,
+            httponly=True, samesite="strict",
+            secure=request.url.scheme == "https" or request.headers.get("x-forwarded-proto") == "https",
+        )
+        return response
+
+    @app.post("/logout")
+    async def logout():
+        """End the session and return to the login page."""
+        response = RedirectResponse("/login", status_code=303)
+        response.delete_cookie(SESSION_COOKIE)
+        return response
 
     @app.get("/api/status")
     async def get_status() -> dict[str, Any]:

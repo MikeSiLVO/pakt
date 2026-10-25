@@ -941,6 +941,11 @@
                             <p style="color: var(--text-dim); font-size: 0.75rem; margin-top: 1rem;">
                                 Pakt uses Trakt but is not endorsed or certified by Trakt.
                             </p>
+                            {% if remote %}
+                            <form method="post" action="/logout" style="margin-top: 1rem;">
+                                <button type="submit" class="btn-secondary">Log out</button>
+                            </form>
+                            {% endif %}
                         </div>
                     </div>
 
@@ -1021,6 +1026,12 @@
     </div>
 
     <script>
+        const nativeFetch = window.fetch.bind(window);
+        window.fetch = async (...args) => {
+            const response = await nativeFetch(...args);
+            if (response.status === 401) location.href = '/login';
+            return response;
+        };
         let isConfigured = false;
         let syncPolling = false;
         let currentView = 'sync';

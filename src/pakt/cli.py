@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 import time
 
@@ -152,7 +153,7 @@ def logout():
 @main.command()
 @click.option("--token", is_flag=True, help="Use manual token entry instead of PIN auth")
 def setup(token: bool):
-    """Interactive setup wizard: link Trakt, then Plex by PIN or a pasted token."""
+    """Interactive setup wizard: link Trakt and Plex, then offer a web UI password."""
     config = Config.load()
 
     console.print("\n[bold cyan]═══ Pakt Setup Wizard ═══[/]\n")
@@ -193,12 +194,49 @@ def setup(token: bool):
         console.print("[green]✓[/] Plex: Already configured")
         console.print(f"    Servers: {', '.join(s.name for s in config.servers)}")
 
+    if not config.web.password_hash and click.confirm(
+        "\nSet a password for opening the web UI from another device?",
+        default=os.path.exists("/.dockerenv"),
+    ):
+        _prompt_web_password(config)
+
     console.print("\n[bold green]═══ Setup Complete! ═══[/]\n")
     console.print("You're ready to sync. Try these commands:")
     console.print("  [cyan]pakt sync --dry-run[/]  - Preview what will sync")
     console.print("  [cyan]pakt sync[/]           - Run the sync")
     console.print("  [cyan]pakt serve[/]          - Start web interface")
     console.print("  [cyan]pakt servers list[/]   - View configured servers")
+
+
+def _prompt_web_password(config: Config) -> None:
+    """Prompt for a new web UI password and save its hash with a fresh session secret."""
+    import secrets
+
+    from pakt.web.auth import MIN_PASSWORD_LENGTH, hash_password
+
+    while True:
+        password = click.prompt("Web UI password", hide_input=True, confirmation_prompt=True)
+        if len(password) >= MIN_PASSWORD_LENGTH:
+            break
+        console.print(f"[yellow]Use at least {MIN_PASSWORD_LENGTH} characters.[/]")
+    config.web.password_hash = hash_password(password)
+    config.web.session_secret = secrets.token_urlsafe(32)
+    config.save()
+    console.print("[green]✓[/] Password saved. Devices that were logged in must log in again.")
+
+
+@main.command()
+@click.option("--clear", is_flag=True, help="Remove the password; the web UI then only opens on this machine")
+def password(clear: bool):
+    """Set the password the web UI asks for when opened from another device, or remove it."""
+    config = Config.load()
+    if clear:
+        config.web.password_hash = ""
+        config.web.session_secret = ""
+        config.save()
+        console.print("[green]✓[/] Password removed. The web UI now only opens on this machine.")
+        return
+    _prompt_web_password(config)
 
 
 def _setup_plex_manual(config: Config) -> None:
@@ -384,8 +422,6 @@ def status():
 @click.option("--tray/--no-tray", default=None, help="Enable/disable system tray icon")
 def serve(host: str | None, port: int | None, tray: bool | None):
     """Start the web interface."""
-    import os
-
     import uvicorn
 
     from pakt.web.app import create_app, sync_state

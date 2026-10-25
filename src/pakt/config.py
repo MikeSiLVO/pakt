@@ -73,11 +73,13 @@ class SchedulerConfig(BaseModel):
 
 
 class WebConfig(BaseModel):
-    """Address the web UI listens on and the extra host names it answers to."""
+    """Address the web UI listens on, the extra host names it answers to, and its login."""
 
     host: str = "127.0.0.1"
     port: int = 7258
     allowed_hosts: list[str] = Field(default_factory=list)
+    password_hash: str = ""
+    session_secret: str = ""
 
 
 class ServerSyncOverrides(BaseModel):

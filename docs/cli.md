@@ -57,6 +57,18 @@ pakt logout
 
 ---
 
+### `pakt password`
+
+Set the password the web UI asks for when opened from another device. A new password logs out every
+device. `--clear` removes it, and the web UI then only opens on the same machine.
+
+```bash
+pakt password
+pakt password --clear
+```
+
+---
+
 ### `pakt status`
 
 Show current configuration status.

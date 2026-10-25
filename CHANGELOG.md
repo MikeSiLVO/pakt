@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **Web UI login for other devices** - Set a password with `pakt password`. The same machine still opens the web UI without one; other devices, Docker and reverse proxies need it, and are refused until one is set
+
 ### Fixed
 - **Trakt collection and watchlist only read the first 100 items** - Trakt now paginates these endpoints. Collection sync re-sent everything past item 100 on every run, and Trakt → Plex watchlist sync missed it
 - **A watch or rating on a second copy of a movie never reached Trakt** - With the same movie in two libraries, only the first copy was checked
