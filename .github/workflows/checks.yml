@@ -31,6 +31,7 @@ jobs:
       - name: Install
         run: |
           python -m venv .venv
+          .venv/bin/python -m pip uninstall -y setuptools
           .venv/bin/python -m pip install --upgrade pip
           .venv/bin/python -m pip install -e ".[tray]" -r .github/requirements-ci.txt
 
