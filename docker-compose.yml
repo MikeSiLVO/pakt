@@ -2,9 +2,18 @@ services:
   pakt:
     build: .
     ports:
-      - "7258:7258"
+      - "127.0.0.1:7258:7258"
     volumes:
-      - pakt-config:/root/.config/pakt
+      - pakt-config:/home/pakt/.config/pakt
+    read_only: true
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
     restart: unless-stopped
 
 volumes:

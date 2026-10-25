@@ -36,7 +36,7 @@ docker-compose run --rm pakt pakt login
 ```
 
 Follow the prompts to:
-1. Link your Trakt account at trakt.tv/activate
+1. Link your Trakt account at the address shown
 2. Link your Plex account at plex.tv/link
 3. Select servers to enable
 
@@ -44,19 +44,11 @@ Follow the prompts to:
 
 ## docker-compose.yml
 
-```yaml
-services:
-  pakt:
-    build: .
-    ports:
-      - "7258:7258"
-    volumes:
-      - pakt-config:/root/.config/pakt
-    restart: unless-stopped
+The included `docker-compose.yml` runs Pakt as an unprivileged user on a read-only filesystem, with
+its config in the `pakt-config` volume at `/home/pakt/.config/pakt`.
 
-volumes:
-  pakt-config:
-```
+A compose file that mounts the volume at `/root/.config/pakt` stops the container with a message.
+Point the mount at `/home/pakt/.config/pakt`; the files in the volume carry over unchanged.
 
 ---
 
@@ -64,19 +56,21 @@ volumes:
 
 ### Ports
 
-Default port is 7258. To change:
+The web UI is published on the Docker host's `localhost:7258` only. To reach it from other devices,
+publish it on every interface:
 
 ```yaml
 ports:
-  - "9000:7258"  # Access via localhost:9000
+  - "7258:7258"
 ```
 
-Or change both:
+The web UI has no login, so anyone who can reach the port can use it.
+
+To use another port:
 
 ```yaml
 ports:
-  - "9000:9000"
-command: pakt serve --host 0.0.0.0 --port 9000
+  - "127.0.0.1:9000:7258"  # Access via localhost:9000
 ```
 
 ---
@@ -87,14 +81,14 @@ Config is stored in a named volume by default:
 
 ```yaml
 volumes:
-  - pakt-config:/root/.config/pakt
+  - pakt-config:/home/pakt/.config/pakt
 ```
 
 To use a local directory instead:
 
 ```yaml
 volumes:
-  - ./config:/root/.config/pakt
+  - ./config:/home/pakt/.config/pakt
 ```
 
 This makes it easier to edit `config.json` directly.
@@ -173,6 +167,13 @@ Or use a separate cron container.
 
 ## Networking
 
+### Web UI Access
+
+To open the web UI by another host name, such as `nas.local`, set `web.allowed_hosts` (see
+[Configuration](configuration.md)).
+
+---
+
 ### Accessing Local Plex Server
 
 If Plex runs on the Docker host:
@@ -212,7 +213,7 @@ docker-compose logs -f pakt
 
 For debug logs, check the config volume:
 ```bash
-docker-compose run --rm pakt cat /root/.config/pakt/debug.log
+docker-compose run --rm pakt cat /home/pakt/.config/pakt/debug.log
 ```
 
 ---
@@ -220,34 +221,10 @@ docker-compose run --rm pakt cat /root/.config/pakt/debug.log
 ## Updating
 
 ```bash
-docker-compose pull
-docker-compose up -d
-```
-
-Or rebuild from source:
-```bash
+git pull
 docker-compose build --no-cache
 docker-compose up -d
 ```
-
----
-
-## Dockerfile
-
-The included Dockerfile:
-
-```dockerfile
-FROM python:3.12-slim
-
-RUN pip install --no-cache-dir pakt
-
-VOLUME /root/.config/pakt
-EXPOSE 7258
-
-CMD ["pakt", "serve", "--host", "0.0.0.0"]
-```
-
-Installs Pakt from PyPI into a minimal image.
 
 ---
 
@@ -280,9 +257,9 @@ Common causes:
 
 ### Permission denied on config volume
 
-If using a bind mount, ensure the directory exists and has correct permissions:
+The container hands the config folder to its `pakt` user (uid 1000) on start. A bind-mounted folder
+must exist on the host before the first start:
 
 ```bash
 mkdir -p ./config
-chmod 755 ./config
 ```
