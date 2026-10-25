@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import os
 import time
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+from urllib.parse import urlsplit
 
 from fastapi import BackgroundTasks, FastAPI, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel, Field
 
@@ -70,11 +72,35 @@ def invalidate_config_cache() -> None:
     _config_cache = (0, None)
 
 
+def _token_saver(config: Config) -> Callable[[dict], None]:
+    """Build a callback that persists rotated Trakt tokens and drops the cached config."""
+    def save(token: dict) -> None:
+        config.save_trakt_token(token)
+        invalidate_config_cache()
+    return save
+
+
+def _host_allowed(host: str, allowed_hosts: list[str]) -> bool:
+    """True when the Host header is localhost, an IP address, or a name the user allowed."""
+    try:
+        name = urlsplit(f"//{host}").hostname
+    except ValueError:
+        return False
+    if not name:
+        return False
+    if name == "localhost" or name in allowed_hosts:
+        return True
+    # IP literals pass; DNS rebinding only works through a hostname
+    try:
+        ipaddress.ip_address(name)
+        return True
+    except ValueError:
+        return False
+
+
 class ConfigUpdate(BaseModel):
     """Configuration update request."""
 
-    trakt_client_id: str | None = None
-    trakt_client_secret: str | None = None
     watched_plex_to_trakt: bool | None = None
     watched_trakt_to_plex: bool | None = None
     ratings_plex_to_trakt: bool | None = None
@@ -83,7 +109,6 @@ class ConfigUpdate(BaseModel):
     watchlist_plex_to_trakt: bool | None = None
     watchlist_trakt_to_plex: bool | None = None
     rating_priority: str | None = None
-    # Scheduler
     scheduler_enabled: bool | None = None
     scheduler_interval_hours: int | None = Field(default=None, ge=1, le=8760)
 
@@ -131,7 +156,7 @@ class ServerCreate(BaseModel):
 
 
 async def _scheduled_sync() -> None:
-    """Run sync for scheduler (no dry run, no UI feedback)."""
+    """Run a live sync for the scheduler unless one is already running."""
     global sync_state
     if sync_state["running"]:
         return
@@ -142,16 +167,10 @@ async def _scheduled_sync() -> None:
 
     try:
         config = Config.load()
-
-        def on_token_refresh(token: dict):
-            """Persist rotated Trakt tokens; refresh tokens are single-use so losing one forces a re-login."""
-            config.save_trakt_token(token)
-            invalidate_config_cache()
-
         result = await run_multi_server_sync(
             config,
             dry_run=False,
-            on_token_refresh=on_token_refresh,
+            on_token_refresh=_token_saver(config),
             log_callback=lambda msg: sync_state["logs"].append(msg),
             cancel_check=lambda: sync_state["cancelled"],
         )
@@ -202,15 +221,41 @@ async def lifespan(app: FastAPI):
 
 
 def create_app() -> FastAPI:
-    """Create the FastAPI application."""
+    """Create the FastAPI application with its host and origin checks and all routes."""
     app = FastAPI(
         title="Pakt",
         description="Plex-Trakt sync",
         version=__version__,
         lifespan=lifespan,
+        docs_url=None,
+        redoc_url=None,
+        openapi_url=None,
     )
 
-    # Templates and assets
+    @app.middleware("http")
+    async def reject_foreign_requests(request: Request, call_next):
+        """Reject DNS-rebound hosts and cross-site writes, and forbid framing of every response."""
+        host = request.headers.get("host", "")
+        allowed_hosts = [h.lower() for h in load_config_cached().web.allowed_hosts]
+        if not _host_allowed(host, allowed_hosts):
+            return PlainTextResponse(
+                f"Host '{host}' is not allowed. Add it to web.allowed_hosts in config.json.", status_code=403
+            )
+        origin = request.headers.get("origin")
+        if request.method not in ("GET", "HEAD", "OPTIONS") and origin:
+            parts = urlsplit(origin)
+            if parts.netloc != host and parts.hostname not in allowed_hosts:
+                return PlainTextResponse(
+                    f"Request from '{origin}' refused. Add its host name to web.allowed_hosts in config.json.",
+                    status_code=403,
+                )
+        response = await call_next(request)
+        response.headers["X-Frame-Options"] = "DENY"
+        response.headers["Content-Security-Policy"] = "frame-ancestors 'none'"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
     template_dir = Path(__file__).parent / "templates"
     templates = Jinja2Templates(directory=str(template_dir))
     assets_dir = Path(__file__).parent.parent / "assets"
@@ -245,6 +290,7 @@ def create_app() -> FastAPI:
                 "config": config,
                 "sync_state": sync_state,
                 "config_dir": str(get_config_dir()),
+                "version": __version__,
             },
         )
 
@@ -298,7 +344,6 @@ def create_app() -> FastAPI:
             "trakt_account": None,
         }
 
-        # Add servers with library info
         for s in config.servers:
             server_data: dict[str, Any] = {
                 "name": s.name,
@@ -321,17 +366,15 @@ def create_app() -> FastAPI:
                     "watchlist_trakt_to_plex": s.sync.watchlist_trakt_to_plex,
                 }
 
-            # Get libraries (cached)
             cache_key = f"plex_libraries_{s.name}"
             cached_libs = get_cached(cache_key)
             if cached_libs:
                 server_data["libraries"] = cached_libs
             else:
-                # plexapi is blocking and an offline server sits on its 30s timeout,
-                # which would stall sync progress and the scheduler along with it.
+                # plexapi blocks; an offline server would stall the event loop until it times out
                 def fetch_libraries(server_config: ServerConfig = s) -> dict[str, list[str]]:
                     """Connect and list this server's libraries."""
-                    plex = PlexClient(server_config)
+                    plex = PlexClient(server_config, account_token=config.plex_token)
                     plex.connect()
                     return {
                         "movie": plex.get_movie_libraries(),
@@ -347,14 +390,13 @@ def create_app() -> FastAPI:
 
             result["servers"].append(server_data)
 
-        # Get Trakt account info (cached)
         if config.trakt.access_token:
             cached_trakt = get_cached("trakt_account")
             if cached_trakt:
                 result["trakt_account"] = cached_trakt
             else:
                 try:
-                    async with TraktClient(config.trakt) as client:
+                    async with TraktClient(config.trakt, on_token_refresh=_token_saver(config)) as client:
                         limits = await client.get_account_limits()
                         trakt_data = {
                             "status": "ok",
@@ -403,13 +445,9 @@ def create_app() -> FastAPI:
 
     @app.post("/api/config")
     async def update_config(update: ConfigUpdate) -> dict[str, str]:
-        """Update configuration."""
+        """Update configuration and apply scheduler changes, starting the scheduler if needed."""
         config = Config.load()
 
-        if update.trakt_client_id is not None:
-            config.trakt.client_id = update.trakt_client_id
-        if update.trakt_client_secret is not None:
-            config.trakt.client_secret = update.trakt_client_secret
         if update.watched_plex_to_trakt is not None:
             config.sync.watched_plex_to_trakt = update.watched_plex_to_trakt
         if update.watched_trakt_to_plex is not None:
@@ -434,7 +472,6 @@ def create_app() -> FastAPI:
         config.save()
         invalidate_config_cache()
 
-        # Update scheduler if settings changed
         global _scheduler
         if update.scheduler_enabled is not None or update.scheduler_interval_hours is not None:
             if _scheduler:
@@ -483,7 +520,7 @@ def create_app() -> FastAPI:
                 config = Config.load()
 
                 def on_token_refresh(token: dict):
-                    """Persist rotated Trakt tokens; refresh tokens are single-use so losing one forces a re-login."""
+                    """Persist rotated Trakt tokens and note the refresh in the sync log."""
                     config.save_trakt_token(token)
                     invalidate_config_cache()
                     log("Token refreshed")
@@ -582,44 +619,47 @@ def create_app() -> FastAPI:
             "last_run": None,
         }
 
-    @app.get("/api/trakt/auth")
-    async def get_trakt_auth_url() -> dict[str, Any]:
-        """Get Trakt device auth code."""
+    # Pending Trakt device login, kept server-side so a page can't submit a device code of its own
+    _trakt_device: dict[str, Any] = {}
+
+    @app.post("/api/trakt/auth")
+    async def start_trakt_auth() -> dict[str, Any]:
+        """Start a Trakt device login, replacing any pending one, and return the code to enter."""
         from pakt.trakt import TraktClient
 
         config = Config.load()
         if not config.trakt.client_id:
             return {"error": "Trakt client_id not configured"}
 
-        async with TraktClient(config.trakt) as client:
-            device = await client.device_code()
-            return {
-                "verification_url": device["verification_url"],
-                "user_code": device["user_code"],
-                "device_code": device["device_code"],
-                "expires_in": device["expires_in"],
-                "interval": device.get("interval", 5),
-            }
+        device = await TraktClient(config.trakt).device_code()
+        _trakt_device.clear()
+        _trakt_device.update(device)
+        return {
+            "verification_url": device["verification_url"],
+            "user_code": device["user_code"],
+            "expires_in": device["expires_in"],
+            "interval": device.get("interval", 5),
+        }
 
     @app.post("/api/trakt/auth/poll")
-    async def poll_trakt_auth(device_code: str) -> dict[str, Any]:
-        """Poll for Trakt auth completion."""
+    async def poll_trakt_auth() -> dict[str, Any]:
+        """Poll the pending Trakt login once and save the tokens when the user has approved it."""
         from pakt.trakt import DeviceAuthStatus, TraktClient
 
+        if not _trakt_device:
+            return {"status": "error", "message": "No Trakt login in progress"}
+
         config = Config.load()
-        async with TraktClient(config.trakt) as client:
-            result = await client.poll_device_token(device_code, interval=5, expires_in=30)
-            if result.status == DeviceAuthStatus.SUCCESS and result.token:
-                config.trakt.access_token = result.token["access_token"]
-                config.trakt.refresh_token = result.token["refresh_token"]
-                config.trakt.expires_at = result.token["created_at"] + result.token["expires_in"]
-                config.save()
-                invalidate_config_cache()
-                return {"status": "authenticated"}
-            elif result.status == DeviceAuthStatus.PENDING:
-                return {"status": "pending"}
-            else:
-                return {"status": "error", "message": result.message}
+        result = await TraktClient(config.trakt).check_device_token(_trakt_device["device_code"])
+        if result.status in (DeviceAuthStatus.PENDING, DeviceAuthStatus.RATE_LIMITED):
+            return {"status": "pending"}
+        _trakt_device.clear()
+        if result.status == DeviceAuthStatus.SUCCESS and result.token:
+            config.save_trakt_token(result.token)
+            invalidate_config_cache()
+            _cache.pop("trakt_account", None)
+            return {"status": "authenticated"}
+        return {"status": "error", "message": result.message}
 
     @app.post("/api/trakt/logout")
     async def logout_trakt() -> dict[str, Any]:
@@ -630,10 +670,8 @@ def create_app() -> FastAPI:
         if not config.trakt.access_token:
             return {"status": "ok", "message": "Not logged in"}
 
-        async with TraktClient(config.trakt) as client:
-            success = await client.revoke_token()
+        success = await TraktClient(config.trakt).revoke_token()
 
-        # Clear local tokens regardless of revocation success
         config.trakt.access_token = ""
         config.trakt.refresh_token = ""
         config.trakt.expires_at = 0
@@ -647,7 +685,6 @@ def create_app() -> FastAPI:
         """Get Trakt account info including VIP status and limits."""
         from pakt.trakt import TraktClient
 
-        # Check cache first
         cached = get_cached("trakt_account")
         if cached:
             return cached
@@ -657,7 +694,7 @@ def create_app() -> FastAPI:
             return {"status": "error", "message": "Not authenticated"}
 
         try:
-            async with TraktClient(config.trakt) as client:
+            async with TraktClient(config.trakt, on_token_refresh=_token_saver(config)) as client:
                 limits = await client.get_account_limits()
                 result = {
                     "status": "ok",
@@ -686,7 +723,7 @@ def create_app() -> FastAPI:
                 return {"status": "error", "message": "No Plex servers configured"}
 
             server = config.get_enabled_servers()[0] if config.get_enabled_servers() else config.servers[0]
-            plex = PlexClient(server)
+            plex = PlexClient(server, account_token=config.plex_token)
             plex.connect()
             return {
                 "status": "ok",
@@ -709,7 +746,7 @@ def create_app() -> FastAPI:
                 return {"status": "error", "message": "No Plex servers configured"}
 
             server = config.get_enabled_servers()[0] if config.get_enabled_servers() else config.servers[0]
-            plex = PlexClient(server)
+            plex = PlexClient(server, account_token=config.plex_token)
             plex.connect()
             return {
                 "status": "ok",
@@ -755,9 +792,9 @@ def create_app() -> FastAPI:
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
-    @app.get("/api/plex/pin/{pin_id}")
+    @app.post("/api/plex/pin/{pin_id}")
     def check_plex_pin_login(pin_id: int) -> dict[str, Any]:
-        """Check if Plex PIN login has been authorized."""
+        """Check if Plex PIN login has been authorized, and save the Plex token when it has."""
         from pakt.plex import check_plex_pin_login as _check_pin
 
         entry = _plex_pin_logins.get(pin_id)
@@ -773,7 +810,7 @@ def create_app() -> FastAPI:
                 config.plex_token = token
                 config.save()
                 invalidate_config_cache()
-                return {"status": "authenticated", "token": token[:10] + "..."}
+                return {"status": "authenticated"}
             else:
                 return {"status": "pending"}
         except Exception as e:
@@ -881,7 +918,7 @@ def create_app() -> FastAPI:
                 name=request.name,
                 server_name=matching.name,
                 url=matching.best_connection_url or "",
-                token=config.plex_token,
+                token=matching.access_token,
                 enabled=True,
             )
         else:
@@ -952,7 +989,7 @@ def create_app() -> FastAPI:
             return {"status": "error", "message": f"Server '{name}' not found"}
 
         try:
-            plex = PlexClient(server)
+            plex = PlexClient(server, account_token=config.plex_token)
             plex.connect()
             return {
                 "status": "ok",
@@ -989,7 +1026,7 @@ def create_app() -> FastAPI:
             }
 
         try:
-            plex = PlexClient(server)
+            plex = PlexClient(server, account_token=config.plex_token)
             plex.connect()
             available = {
                 "movie": plex.get_movie_libraries(),

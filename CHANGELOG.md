@@ -1,5 +1,61 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **Trakt collection and watchlist only read the first 100 items** - Trakt now paginates these endpoints. Collection sync re-sent everything past item 100 on every run, and Trakt → Plex watchlist sync missed it
+- **A watch or rating on a second copy of a movie never reached Trakt** - With the same movie in two libraries, only the first copy was checked
+- **Collection metadata came from the first copy of a movie** - It now comes from the best quality copy
+- **One error skipped the rest of a server's sync** - A failed phase is logged and the next phase still runs
+- **`pakt sync` reported success when something failed** - It now exits with status 1, and lists the errors
+- **Two Pakt processes could sync at once** - A second sync is now refused while the first runs
+- **The first sync of a large library could fail on Trakt**
+- **Libraries from older Plex agents were skipped** - Items from the legacy IMDb, TMDB and TheTVDB agents are matched again
+- **Shows with only a TMDB ID were skipped**
+- **A title or library name containing square brackets could stop a sync**, and server and library names vanished from the logs
+- **Episodes with no season or episode number stopped the episode sync** - They are skipped and counted
+- **Failed Plex updates and items Trakt couldn't match went unreported**
+- **Cancel was ignored late in the episode phase**
+- **The watchlist synced again for every server on the same Plex account**
+- **A movie marked watched could be added straight back to the Trakt watchlist**
+- **Watchlist sync froze the web UI** while it searched Plex
+- **The scheduler waited a full interval after every restart** - It now counts from the last completed sync
+- **Opening the web UI could log you out of Trakt** - A page load near token expiry refreshed the token without saving it, and Trakt refresh tokens only work once
+- **Web UI Trakt login gave up after about 30 seconds**
+- **A dead Trakt refresh token was retried every run** - It now reports the problem, and keeps using the current token until it expires
+- **A Plex token signed out by Plex gave a confusing error** - It now says to sign in again
+- **`pakt libraries` with a mistyped name switched to syncing every library** - It now stops without saving
+- **Running `pakt setup --token` again added a second server**
+- **`pakt logout` kept the tokens when Trakt couldn't be reached**
+- **The tray couldn't reach the web UI when it was bound to `0.0.0.0`**
+- **Configured libraries missing from the server were ignored silently** - They are now reported
+- **sync.log only rotated at startup** and missed messages from the Plex and scheduler code
+
+### Security
+- **A shared Plex server's owner could capture your Plex account token** - Each server now gets its own access token, and the account token only goes to plex.tv
+- **Plex connections prefer HTTPS** - Plain HTTP is only used on your local network
+- **Login hijack from a malicious website** - Any page could submit its own Trakt device code to a running web UI and link Pakt to another account. The device code now stays server-side
+- **Cross-site and DNS rebinding requests are refused** - Writes from another site's page get a 403, as do requests that reach the web UI through an unknown host name. Add extra names to `web.allowed_hosts`
+- **A server name could run script in the web UI**
+- **The web UI can no longer be framed by other sites**, and the unused API docs pages are off
+- **Shared servers are no longer selected by default** during setup
+- **Config, logs and the config folder are readable by your user only** on Linux and macOS
+- **Trakt client secret removed** - Trakt deprecated it for desktop apps. Pakt no longer stores or sends it
+- **Trakt API keys can no longer be changed through the web API**
+- **The Plex PIN login response no longer echoes part of the token**
+- **Dependencies raised past known vulnerabilities** - certifi, h11, Jinja2, Pillow, pydantic, requests, starlette and urllib3
+
+### Changed
+- **Docker** - The container runs as an unprivileged user on a read-only filesystem, and the web UI is published on `localhost` only. Mount the config volume at `/home/pakt/.config/pakt`; the container stops with a message while it is still at `/root/.config/pakt`. See the Docker guide to publish the port on your network
+- **Trakt login uses `auth.trakt.tv`** - Trakt stops accepting logins through other hosts on 1 February 2027
+- **Trakt requests identify as `pakt/<version>`**, and Plex requests as Pakt with a device ID kept in config.json
+- **Trakt rate limits** - Writes are spaced one second apart, and retries without a `Retry-After` header back off with jitter. Locked accounts and refused API keys get their own messages
+- **plexapi 4.18.0 or newer is required** - Older versions call the retired Plex watchlist host
+- **Web UI About card** - Shows the installed version and Trakt's attribution
+
+### Removed
+- **Unused `aiosqlite` and `pydantic-settings` dependencies**
+
 ## [0.4.0] - 2026-07-21
 
 ### Fixed

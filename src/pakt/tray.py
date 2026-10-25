@@ -38,7 +38,7 @@ def _get_icon_image() -> "Image.Image":
 
 
 class PaktTray:
-    """System tray icon for Pakt."""
+    """System tray icon for Pakt; it looks up the scheduler on demand, as that starts later."""
 
     def __init__(
         self,
@@ -47,14 +47,6 @@ class PaktTray:
         shutdown_callback: Callable[[], None] | None = None,
         scheduler_getter: Callable[[], "SyncScheduler | None"] | None = None,
     ) -> None:
-        """Initialize the system tray.
-
-        Args:
-            web_url: URL of the web interface
-            sync_callback: Function to trigger sync
-            shutdown_callback: Function to shutdown the application
-            scheduler_getter: Looks up the scheduler on demand, since it starts after the tray
-        """
         if not TRAY_AVAILABLE:
             raise ImportError("pystray and Pillow are required for system tray support")
 
@@ -98,11 +90,7 @@ class PaktTray:
         return bool(scheduler and scheduler.is_enabled and scheduler.next_run)
 
     def _get_menu(self) -> "pystray.Menu":
-        """Create the context menu.
-
-        Label and visibility are callables because the menu is built once at
-        startup, before the scheduler exists.
-        """
+        """Get the context menu; labels are callables, built before the scheduler exists."""
         return pystray.Menu(
             pystray.MenuItem("Open Web UI", self._open_web_ui, default=True),
             pystray.MenuItem("Sync Now", self._trigger_sync),
@@ -143,8 +131,3 @@ class PaktTray:
         if self._icon:
             self._icon.stop()
             self._icon = None
-
-    def update_menu(self) -> None:
-        """Update the menu (e.g., after scheduler status changes)."""
-        if self._icon:
-            self._icon.menu = self._get_menu()

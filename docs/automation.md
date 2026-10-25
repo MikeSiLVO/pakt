@@ -177,6 +177,9 @@ Add (runs daily at 6 AM):
 
 Adjust the path to `pakt` based on your installation (`which pakt`).
 
+`pakt sync` exits with status 1 when a server or sync phase fails, so cron and service managers can
+report it.
+
 ## Built-in Scheduler
 
 Alternatively, use Pakt's built-in scheduler via the web UI:

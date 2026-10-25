@@ -74,19 +74,48 @@ pakt setup
 
 ---
 
-### "Token refresh failed"
+### "Trakt refused the refresh token"
 
-**Cause:** Trakt refresh token expired or revoked.
+**Cause:** Trakt refresh token expired or revoked. Tokens issued before Trakt's login migration
+show `session not found` and need one fresh login.
 
 **Solution:**
 ```bash
-pakt logout
 pakt login
 ```
 
 ---
 
+### "Another Pakt sync is already running"
+
+**Cause:** A sync from another `pakt` process (the CLI, the web UI or the scheduler) is still running.
+Only one sync runs at a time.
+
+**Solution:** Wait for it to finish, or cancel it from the web UI.
+
+---
+
+### "Plex refused the saved token"
+
+**Cause:** The Plex token was signed out, for example by a Plex password change or "Sign out of all
+devices".
+
+**Solution:** Sign in again with `pakt setup`, or Re-Link Account in the web UI settings.
+
+---
+
 ## Web Server Issues
+
+### "Host '...' is not allowed"
+
+**Cause:** The web UI was opened by a host name other than `localhost` or an IP address.
+
+**Solution:** Add the name to `web.allowed_hosts` in `config.json`:
+```json
+"web": {"host": "0.0.0.0", "port": 7258, "allowed_hosts": ["pakt.example.com"]}
+```
+
+---
 
 ### "Port already in use"
 
@@ -244,6 +273,9 @@ Options:
 2. `pakt serve` not running
 3. Interval set to 0 (the web UI rejects anything below 1 hour)
 
+After `pakt serve` starts, the first scheduled sync runs one interval after the last completed sync,
+or a minute after start when that time has already passed.
+
 **Solutions:**
 
 Check scheduler config:
@@ -261,6 +293,8 @@ The scheduler only runs while `pakt serve` is running. For persistent scheduling
 ---
 
 ## Debug Logs
+
+Every sync writes to `sync.log` in the config folder. It rolls over to `sync.log.1` at 5 MB.
 
 When running in tray mode (`pythonw -m pakt serve --tray`), logs are written to:
 

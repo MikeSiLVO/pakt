@@ -657,7 +657,7 @@
 
                 <div id="step1-start">
                     <p style="color: var(--text-dim); margin-bottom: 1.5rem;">
-                        Click below to link your Trakt account. You'll be given a code to enter on trakt.tv.
+                        Click below to link your Trakt account. You'll be given a code to enter on Trakt's site.
                     </p>
                     <button class="btn-primary btn-block btn-lg" onclick="startTraktAuth()">
                         Connect to Trakt
@@ -942,12 +942,15 @@
                         <div class="card-content">
                             <div class="row">
                                 <span class="label">Version</span>
-                                <span class="value">0.1.0</span>
+                                <span class="value">{{ version }}</span>
                             </div>
                             <div class="row">
                                 <span class="label">Config</span>
                                 <span class="value" style="font-size: 0.75rem;">{{ config_dir }}</span>
                             </div>
+                            <p style="color: var(--text-dim); font-size: 0.75rem; margin-top: 1rem;">
+                                Pakt uses Trakt but is not endorsed or certified by Trakt.
+                            </p>
                         </div>
                     </div>
 
@@ -1165,7 +1168,7 @@
             document.getElementById('step1-auth').classList.remove('hidden');
 
             try {
-                const resp = await fetch('/api/trakt/auth');
+                const resp = await fetch('/api/trakt/auth', {method: 'POST'});
                 const data = await resp.json();
 
                 if (data.error) {
@@ -1181,7 +1184,7 @@
 
                 // Poll for completion
                 const pollAuth = async () => {
-                    const pollResp = await fetch('/api/trakt/auth/poll?device_code=' + data.device_code, {method: 'POST'});
+                    const pollResp = await fetch('/api/trakt/auth/poll', {method: 'POST'});
                     const pollData = await pollResp.json();
 
                     if (pollData.status === 'authenticated') {
@@ -1276,7 +1279,7 @@
             if (!plexPinId) return;
 
             try {
-                const resp = await fetch(`/api/plex/pin/${plexPinId}`);
+                const resp = await fetch(`/api/plex/pin/${plexPinId}`, {method: 'POST'});
                 const data = await resp.json();
 
                 if (data.status === 'authenticated') {
@@ -1322,7 +1325,7 @@
                 const owned = server.owned ? '<span style="color: var(--success);">(owned)</span>' : '<span style="color: var(--text-dim);">(shared)</span>';
                 const local = server.has_local ? '<span style="color: var(--accent);">local</span>' : '';
                 return `<label class="toggle" style="margin-bottom: 0.5rem;">
-                    <input type="checkbox" data-server="${escapeHtml(server.name)}" checked>
+                    <input type="checkbox" data-server="${escapeHtml(server.name)}" ${server.owned ? 'checked' : ''}>
                     <span>${escapeHtml(server.name)} ${owned} ${local}</span>
                 </label>`;
             }).join('');
@@ -1862,8 +1865,7 @@
                     </div>`;
                 }).join('');
 
-                // Wired here rather than via onclick: escapeHtml leaves quotes alone,
-                // so a name like "Mike's NAS" would break an inline handler.
+                // Wired here, not inline: a handler attribute decodes the escaped name back into script
                 container.querySelectorAll('button[data-action]').forEach(btn => {
                     const name = btn.dataset.server;
                     if (btn.dataset.action === 'toggle') {
@@ -1918,7 +1920,7 @@
             if (!settingsPinId) return;
 
             try {
-                const resp = await fetch(`/api/plex/pin/${settingsPinId}`);
+                const resp = await fetch(`/api/plex/pin/${settingsPinId}`, {method: 'POST'});
                 const data = await resp.json();
 
                 if (data.status === 'authenticated') {
@@ -2075,6 +2077,9 @@
                 </div>`;
             }
             container.innerHTML = html;
+            container.querySelectorAll('input[data-type], select[data-sync]').forEach(el => {
+                el.addEventListener('change', () => saveServerSettings(el.dataset.server));
+            });
         }
 
         function renderLibTypeCheckboxes(serverName, libType, available, selected) {
@@ -2086,7 +2091,7 @@
                 const safeServer = escapeHtml(serverName);
                 const safeLib = escapeHtml(lib);
                 return `<label class="toggle" style="margin-bottom: 0.5rem;">
-                    <input type="checkbox" data-server="${safeServer}" data-type="${libType}" data-lib="${safeLib}" ${checked ? 'checked' : ''} onchange="saveServerSettings('${safeServer}')">
+                    <input type="checkbox" data-server="${safeServer}" data-type="${libType}" data-lib="${safeLib}" ${checked ? 'checked' : ''}>
                     <span>${safeLib}</span>
                 </label>`;
             }).join('');
@@ -2099,7 +2104,7 @@
             const globalLabel = globalVal ? 'On' : 'Off';
 
             // tri-state: null (global), true, false
-            let selectHtml = `<select data-server="${safeServer}" data-sync="${option}" onchange="saveServerSettings('${safeServer}')" style="padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.8rem;">`;
+            let selectHtml = `<select data-server="${safeServer}" data-sync="${option}" style="padding: 0.25rem 0.5rem; border-radius: 4px; border: 1px solid var(--border); background: var(--bg); color: var(--text); font-size: 0.8rem;">`;
             selectHtml += `<option value="null" ${serverVal === null || serverVal === undefined ? 'selected' : ''}>Global (${globalLabel})</option>`;
             selectHtml += `<option value="true" ${serverVal === true ? 'selected' : ''}>On</option>`;
             selectHtml += `<option value="false" ${serverVal === false ? 'selected' : ''}>Off</option>`;
@@ -2123,10 +2128,10 @@
             // Collect library selections
             const movieLibs = [];
             const showLibs = [];
-            document.querySelectorAll(`input[data-server="${serverName}"][data-type="movie"]:checked`).forEach(el => {
+            document.querySelectorAll(`input[data-server="${CSS.escape(serverName)}"][data-type="movie"]:checked`).forEach(el => {
                 movieLibs.push(el.dataset.lib);
             });
-            document.querySelectorAll(`input[data-server="${serverName}"][data-type="show"]:checked`).forEach(el => {
+            document.querySelectorAll(`input[data-server="${CSS.escape(serverName)}"][data-type="show"]:checked`).forEach(el => {
                 showLibs.push(el.dataset.lib);
             });
             const allMovies = movieLibs.length === data.available.movie.length;
@@ -2134,7 +2139,7 @@
 
             // Collect sync overrides
             const syncOverrides = {};
-            document.querySelectorAll(`select[data-server="${serverName}"][data-sync]`).forEach(el => {
+            document.querySelectorAll(`select[data-server="${CSS.escape(serverName)}"][data-sync]`).forEach(el => {
                 const opt = el.dataset.sync;
                 const val = el.value;
                 syncOverrides[opt] = val === 'null' ? null : val === 'true';

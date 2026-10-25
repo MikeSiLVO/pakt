@@ -3,259 +3,348 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gc
 import logging
+import logging.handlers
+import os
 import re
+import sys
 import threading
 import time
+from collections.abc import Awaitable, Generator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 from rich.console import Console
+from rich.errors import MarkupError
+from rich.markup import escape
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
+from rich.text import Text
 
-from pakt.config import Config, ServerConfig, get_config_dir
+from pakt.config import Config, ServerConfig, get_config_dir, set_last_sync
 from pakt.models import PlexIds, RatedItem, SyncResult, WatchedItem
-from pakt.plex import PlexClient, extract_media_metadata, extract_plex_ids
-from pakt.trakt import AccountLimits, TraktAccountLimitError, TraktClient
+from pakt.plex import PlexAuthError, PlexClient, extract_media_metadata, extract_plex_ids, media_score
+from pakt.trakt import TraktAccountLimitError, TraktAuthError, TraktClient
 
 console = Console()
 
+T = TypeVar("T")
 
-@dataclass
+MOVIE_ID_TYPES = ("imdb", "tmdb")
+SHOW_ID_TYPES = ("tvdb", "imdb", "tmdb")
+CONTROL_CHARS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f]")
+LOG_MAX_BYTES = 5 * 1024 * 1024
+
+
 class TraktCache:
-    """Cached Trakt data to avoid re-fetching for multiple servers."""
+    """Trakt data fetched once per run and shared by every server and phase."""
 
-    account_limits: AccountLimits | None = None
-    watched_movies: list[WatchedItem] = field(default_factory=list)
-    movie_ratings: list[RatedItem] = field(default_factory=list)
-    watched_shows: list[WatchedItem] = field(default_factory=list)
-    episode_ratings: list[RatedItem] = field(default_factory=list)
-    collection_movies: list[dict] = field(default_factory=list)
-    collection_shows: list[dict] = field(default_factory=list)
-    watchlist_movies: list[dict] = field(default_factory=list)
-    watchlist_shows: list[dict] = field(default_factory=list)
+    def __init__(self) -> None:
+        self._data: dict[str, Any] = {}
+
+    async def get(self, fetch: Callable[[], Awaitable[T]]) -> T:
+        """Get what a TraktClient getter returns, calling it only the first time."""
+        key = fetch.__name__
+        if key not in self._data:
+            self._data[key] = await fetch()
+        return self._data[key]
 
 
 @dataclass
 class PushedToTrakt:
-    """Items already sent to Trakt this run.
+    """Items sent to Trakt this run, which later servers must not post again from the cache."""
 
-    The shared TraktCache is fetched once and never refreshed, so without this a
-    second server would still see an item as missing and post it again.
-    """
-
-    watched_movies: set[str] = field(default_factory=set)
-    rated_movies: set[str] = field(default_factory=set)
+    watched_movies: set[tuple] = field(default_factory=set)
+    rated_movies: set[tuple] = field(default_factory=set)
     watched_episodes: set[tuple] = field(default_factory=set)
     rated_episodes: set[tuple] = field(default_factory=set)
-
-
-@dataclass
-class MovieProcessingResult:
-    """Results from movie processing (runs in thread)."""
-
-    movies_to_mark_watched_trakt: list[dict] = field(default_factory=list)
-    movies_to_mark_watched_plex: list[Any] = field(default_factory=list)
-    movies_to_rate_trakt: list[dict] = field(default_factory=list)
-    movies_to_rate_plex: list[tuple[Any, int]] = field(default_factory=list)
-    cancelled: bool = False
+    watchlist_accounts: set[str] = field(default_factory=set)
 
 
 @dataclass
 class EpisodeProcessingResult:
-    """Results from episode processing (runs in thread)."""
+    """Episode changes worked out in the worker thread, each with a display label."""
 
-    episodes_to_mark_watched_trakt: list[dict] = field(default_factory=list)
-    episodes_to_mark_watched_trakt_display: list[str] = field(default_factory=list)
-    episodes_to_mark_watched_plex: list[Any] = field(default_factory=list)
-    episodes_to_rate_trakt: list[dict] = field(default_factory=list)
-    episodes_to_rate_trakt_display: list[str] = field(default_factory=list)
-    episodes_to_rate_plex: list[tuple[Any, int]] = field(default_factory=list)
+    watched_to_trakt: list[tuple[dict, int, dict, str]] = field(default_factory=list)
+    watched_to_plex: list[tuple[Any, str]] = field(default_factory=list)
+    rated_to_trakt: list[tuple[dict, int, dict, str]] = field(default_factory=list)
+    rated_to_plex: list[tuple[Any, int, str]] = field(default_factory=list)
+    watched_keys: set[tuple] = field(default_factory=set)
+    rated_keys: set[tuple] = field(default_factory=set)
     skipped_no_ids: int = 0
+    skipped_no_number: int = 0
     cancelled: bool = False
+
+
+def _safe(text: Any) -> str:
+    """Make outside text safe in a markup log line: markup escaped, control characters gone."""
+    return escape(CONTROL_CHARS.sub("", str(text)))
+
+
+def _id_keys(ids: PlexIds | dict[str, Any], kinds: tuple[str, ...]) -> list[tuple[str, Any]]:
+    """Typed id pairs in order of preference; ids of different kinds never collide."""
+    if isinstance(ids, dict):
+        values = [ids.get(kind) for kind in kinds]
+    else:
+        values = [getattr(ids, kind, None) for kind in kinds]
+    return [(kind, value) for kind, value in zip(kinds, values) if value]
+
+
+def _trakt_item(item: Any, plex_ids: PlexIds, kinds: tuple[str, ...]) -> dict | None:
+    """Trakt movie or show object for a Plex item, or None when it carries none of the ids."""
+    ids = dict(_id_keys(plex_ids, kinds))
+    if not ids:
+        return None
+    return {"title": item.title, "year": item.year, "ids": ids}
+
+
+def _group_by_show(rows: list[tuple[dict, int, dict, str]]) -> list[dict]:
+    """Nest episode entries under their show and season, the shape Trakt's sync endpoints take."""
+    shows: dict[tuple, dict] = {}
+    for show, season, episode, _label in rows:
+        entry = shows.setdefault(tuple(sorted(show["ids"].items())), {**show, "seasons": {}})
+        entry["seasons"].setdefault(season, []).append(episode)
+    return [
+        {**show, "seasons": [{"number": n, "episodes": eps} for n, eps in sorted(show["seasons"].items())]}
+        for show in shows.values()
+    ]
+
+
+def _rating_direction(
+    plex: int | None, trakt: int | None, priority: str, to_trakt: bool, to_plex: bool
+) -> tuple[bool, bool]:
+    """Which way a rating should flow, as (send Plex's to Trakt, send Trakt's to Plex)."""
+    if plex and not trakt:
+        return to_trakt, False
+    if trakt and not plex:
+        return False, to_plex
+    if plex and trakt and plex != trakt:
+        return priority == "plex" and to_trakt, priority == "trakt" and to_plex
+    return False, False
+
+
+def _episode_index(shows: list[WatchedItem]) -> set[tuple]:
+    """Keys of every watched episode in Trakt's watched shows, one per show id kind."""
+    index: set[tuple] = set()
+    for show_item in shows:
+        keys = _id_keys(show_item.show.get("ids", {}), SHOW_ID_TYPES) if show_item.show else []
+        for season in show_item.seasons or []:
+            for ep in season.get("episodes", []):
+                if _is_watched_episode(ep):
+                    index.update((key, season.get("number", 0), ep.get("number", 0)) for key in keys)
+    return index
+
+
+def _episode_ratings(ratings: list[RatedItem]) -> dict[tuple, int]:
+    """Trakt episode ratings keyed like the watched episode index."""
+    index: dict[tuple, int] = {}
+    for item in ratings:
+        if item.episode and item.show:
+            season, number = item.episode.get("season", 0), item.episode.get("number", 0)
+            for key in _id_keys(item.show.get("ids", {}), SHOW_ID_TYPES):
+                index[(key, season, number)] = item.rating
+    return index
 
 
 def _process_episodes_in_thread(
     plex_episodes: list[Any],
     plex_show_ids_by_key: dict[str, PlexIds],
-    trakt_watched_episodes: dict[tuple, dict],
-    trakt_episode_ratings: dict[tuple, dict],
-    sync_watched_plex_to_trakt: bool,
-    sync_watched_trakt_to_plex: bool,
-    sync_ratings_plex_to_trakt: bool,
-    sync_ratings_trakt_to_plex: bool,
+    trakt_watched: set[tuple],
+    trakt_ratings: dict[tuple, int],
+    options: dict[str, bool],
     rating_priority: str,
     cancel_event: threading.Event,
     pushed: PushedToTrakt,
-    dry_run: bool,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> EpisodeProcessingResult:
-    """Process episodes in a thread to not block the event loop.
-
-    This is CPU-bound work (dict lookups, comparisons) that would otherwise
-    block the async event loop and prevent cancellation/UI updates.
-    """
+    """Compare Plex episodes against Trakt in a worker thread, off the event loop."""
     result = EpisodeProcessingResult()
-    processed_episode_ids: set[tuple] = set()
     total = len(plex_episodes)
 
-    # Pre-extract all episode data to avoid slow PlexAPI attribute access in comparison loop
-    # CRITICAL: PlexAPI's __getattribute__ triggers network reload if attribute is None!
-    # Disable auto-reload to prevent 24ms network call per episode for remote servers.
-    episode_data: list[tuple] = []
+    # read each field once; PlexAPI reloads over the network on a None attribute
+    rows: list[tuple] = []
     for i, ep in enumerate(plex_episodes):
         if i % 100 == 0 and cancel_event.is_set():
             result.cancelled = True
             return result
         if i % 500 == 0 and progress_callback:
             progress_callback(i, total)
-
-        episode_data.append((
-            str(ep.grandparentRatingKey),  # show_key
-            ep.parentIndex,  # seasonNumber
-            ep.index,  # episodeNumber
-            ep.viewCount > 0 if ep.viewCount else False,  # isWatched
-            ep.userRating,
-            ep.grandparentTitle,
-            _plex_dt_to_utc_iso(ep.lastViewedAt),
-            _plex_dt_to_utc_iso(ep.lastRatedAt),
-            ep,  # Keep reference for Plex operations
+        rows.append((
+            str(ep.grandparentRatingKey), ep.parentIndex, ep.index, bool(ep.viewCount), ep.userRating,
+            ep.grandparentTitle, _plex_dt_to_utc_iso(ep.lastViewedAt), _plex_dt_to_utc_iso(ep.lastRatedAt), ep,
         ))
-
     if progress_callback:
         progress_callback(total, total)
 
-    # Now iterate over extracted data (pure Python, no network calls)
-    for (show_key, season_num, ep_num, plex_watched, plex_ep_rating, show_title,
-         plex_watched_at, plex_rated_at, episode) in episode_data:
+    for i, (show_key, season, number, plex_watched, plex_rating, show_title,
+            watched_at, rated_at, episode) in enumerate(rows):
+        if i % 500 == 0 and cancel_event.is_set():
+            result.cancelled = True
+            return result
         show_ids = plex_show_ids_by_key.get(show_key)
-        if not show_ids or (not show_ids.tvdb and not show_ids.imdb):
+        keys = _id_keys(show_ids, SHOW_ID_TYPES) if show_ids else []
+        if not keys:
             result.skipped_no_ids += 1
             continue
+        if season is None or number is None:
+            result.skipped_no_number += 1
+            continue
 
-        # Same episode in several libraries: Trakt needs it once, but each Plex
-        # copy still needs its own write or the other copies stay unwatched.
-        ep_key = (show_ids.tvdb or show_ids.imdb, season_num, ep_num)
-        duplicate = ep_key in processed_episode_ids
-        processed_episode_ids.add(ep_key)
+        ep_key = (keys[0], season, number)
+        label = f"{show_title} S{season:02d}E{number:02d}"
+        show = {"ids": dict(keys)}
 
-        skip_watched_push = duplicate or ep_key in pushed.watched_episodes
-        skip_rating_push = duplicate or ep_key in pushed.rated_episodes
+        trakt_has_watch = any((key, season, number) in trakt_watched for key in keys)
+        if plex_watched and not trakt_has_watch:
+            if (options["watched_plex_to_trakt"] and ep_key not in pushed.watched_episodes
+                    and ep_key not in result.watched_keys):
+                entry: dict[str, Any] = {"number": number}
+                if watched_at:
+                    entry["watched_at"] = watched_at
+                result.watched_to_trakt.append((show, season, entry, label))
+                result.watched_keys.add(ep_key)
+        elif trakt_has_watch and not plex_watched and options["watched_trakt_to_plex"]:
+            result.watched_to_plex.append((episode, label))
 
-        # Check watched status
-        trakt_watched = False
-        if show_ids.tvdb and (show_ids.tvdb, season_num, ep_num) in trakt_watched_episodes:
-            trakt_watched = True
-        elif show_ids.imdb and (show_ids.imdb, season_num, ep_num) in trakt_watched_episodes:
-            trakt_watched = True
-
-        if plex_watched and not trakt_watched and not skip_watched_push and sync_watched_plex_to_trakt:
-            ep_ids = {}
-            if show_ids.tvdb:
-                ep_ids["tvdb"] = show_ids.tvdb
-            if show_ids.imdb:
-                ep_ids["imdb"] = show_ids.imdb
-            if ep_ids:
-                episode_entry: dict[str, Any] = {"number": ep_num}
-                if plex_watched_at:
-                    episode_entry["watched_at"] = plex_watched_at
-                result.episodes_to_mark_watched_trakt.append({
-                    "ids": ep_ids,
-                    "seasons": [{"number": season_num, "episodes": [episode_entry]}]
-                })
-                result.episodes_to_mark_watched_trakt_display.append(
-                    f"{show_title} S{season_num:02d}E{ep_num:02d}"
-                )
-                if not dry_run:
-                    pushed.watched_episodes.add(ep_key)
-        elif trakt_watched and not plex_watched and sync_watched_trakt_to_plex:
-            result.episodes_to_mark_watched_plex.append(episode)
-
-        # Check ratings
-        plex_ep_rating_int = int(plex_ep_rating) if plex_ep_rating else None
-        trakt_ep_rating = None
-        if show_ids.tvdb and (show_ids.tvdb, season_num, ep_num) in trakt_episode_ratings:
-            trakt_ep_rating = trakt_episode_ratings[(show_ids.tvdb, season_num, ep_num)]
-        elif show_ids.imdb and (show_ids.imdb, season_num, ep_num) in trakt_episode_ratings:
-            trakt_ep_rating = trakt_episode_ratings[(show_ids.imdb, season_num, ep_num)]
-
-        trakt_ep_rating_val = trakt_ep_rating["rating"] if trakt_ep_rating else None
-
-        # Determine if rating should sync to Trakt
-        sync_rating_to_trakt = False
-        sync_rating_to_plex = False
-        if (plex_ep_rating_int and not trakt_ep_rating_val and not skip_rating_push
-                and sync_ratings_plex_to_trakt):
-            sync_rating_to_trakt = True
-        elif trakt_ep_rating_val and not plex_ep_rating_int and sync_ratings_trakt_to_plex:
-            sync_rating_to_plex = True
-        elif plex_ep_rating_int and trakt_ep_rating_val and plex_ep_rating_int != trakt_ep_rating_val:
-            if rating_priority == "plex" and not skip_rating_push and sync_ratings_plex_to_trakt:
-                sync_rating_to_trakt = True
-            elif rating_priority == "trakt" and sync_ratings_trakt_to_plex:
-                sync_rating_to_plex = True
-
-        if sync_rating_to_trakt:
-            ep_ids = {}
-            if show_ids.tvdb:
-                ep_ids["tvdb"] = show_ids.tvdb
-            if show_ids.imdb:
-                ep_ids["imdb"] = show_ids.imdb
-            if ep_ids:
-                rating_entry: dict[str, Any] = {"number": ep_num, "rating": plex_ep_rating_int}
-                if plex_rated_at:
-                    rating_entry["rated_at"] = plex_rated_at
-                result.episodes_to_rate_trakt.append({
-                    "ids": ep_ids,
-                    "seasons": [{"number": season_num, "episodes": [rating_entry]}]
-                })
-                result.episodes_to_rate_trakt_display.append(
-                    f"{show_title} S{season_num:02d}E{ep_num:02d} = {plex_ep_rating_int}"
-                )
-                if not dry_run:
-                    pushed.rated_episodes.add(ep_key)
-        elif sync_rating_to_plex and trakt_ep_rating_val is not None:
-            result.episodes_to_rate_plex.append((episode, trakt_ep_rating_val))
+        plex_rating_int = int(plex_rating) if plex_rating else None
+        trakt_rating = next(
+            (trakt_ratings[(key, season, number)] for key in keys if (key, season, number) in trakt_ratings), None
+        )
+        send, fetch = _rating_direction(
+            plex_rating_int, trakt_rating, rating_priority,
+            options["ratings_plex_to_trakt"], options["ratings_trakt_to_plex"],
+        )
+        if send and ep_key not in pushed.rated_episodes and ep_key not in result.rated_keys:
+            entry = {"number": number, "rating": plex_rating_int}
+            if rated_at:
+                entry["rated_at"] = rated_at
+            result.rated_to_trakt.append((show, season, entry, f"{label} = {plex_rating_int}"))
+            result.rated_keys.add(ep_key)
+        elif fetch and trakt_rating is not None:
+            result.rated_to_plex.append((episode, trakt_rating, f"{label} = {trakt_rating}"))
 
     return result
 
 
-# File logger setup
+def _plan_watchlist(
+    plex: PlexClient,
+    trakt_movies: list[dict],
+    trakt_shows: list[dict],
+    just_watched: set[tuple],
+    options: dict[str, bool],
+    is_cancelled: Callable[[], bool],
+    warn: Callable[[str], None],
+) -> tuple[list[dict], list[dict], list[Any], int] | None:
+    """Plan watchlist additions both ways in a worker thread; None if cancelled."""
+    plex_watchlist = plex.get_watchlist()
+    plex_movie_keys: set[tuple] = set()
+    plex_show_keys: set[tuple] = set()
+    plex_entries = []
+    for item in plex_watchlist:
+        plex_ids = extract_plex_ids(item)
+        is_show = (getattr(item, "TYPE", None) or getattr(item, "type", None)) == "show"
+        keys = _id_keys(plex_ids, SHOW_ID_TYPES if is_show else MOVIE_ID_TYPES)
+        (plex_show_keys if is_show else plex_movie_keys).update(keys)
+        plex_entries.append((item, plex_ids, is_show, keys))
+
+    trakt_movie_keys = {k for i in trakt_movies for k in _id_keys(i.get("movie", {}).get("ids", {}), MOVIE_ID_TYPES)}
+    trakt_show_keys = {k for i in trakt_shows for k in _id_keys(i.get("show", {}).get("ids", {}), SHOW_ID_TYPES)}
+
+    movies_to_trakt: list[dict] = []
+    shows_to_trakt: list[dict] = []
+    if options["watchlist_plex_to_trakt"]:
+        for item, plex_ids, is_show, keys in plex_entries:
+            on_trakt = any(k in (trakt_show_keys if is_show else trakt_movie_keys) for k in keys)
+            # Trakt drops a movie from its watchlist once it is watched
+            if on_trakt or (not is_show and any(k in just_watched for k in keys)):
+                continue
+            data = _trakt_item(item, plex_ids, SHOW_ID_TYPES if is_show else MOVIE_ID_TYPES)
+            if data:
+                (shows_to_trakt if is_show else movies_to_trakt).append(data)
+
+    items_to_plex: list[Any] = []
+    if options["watchlist_trakt_to_plex"]:
+        wanted = [("movie", i.get("movie", {}), MOVIE_ID_TYPES, plex_movie_keys) for i in trakt_movies]
+        wanted += [("show", i.get("show", {}), SHOW_ID_TYPES, plex_show_keys) for i in trakt_shows]
+        for libtype, trakt_item, kinds, plex_keys in wanted:
+            if is_cancelled():
+                return None
+            keys = _id_keys(trakt_item.get("ids", {}), kinds)
+            title = trakt_item.get("title", "")
+            if not title or any(k in plex_keys for k in keys):
+                continue
+            try:
+                for match in plex.search_discover(title, libtype=libtype)[:5]:
+                    if any(k in keys for k in _id_keys(extract_plex_ids(match), kinds)):
+                        items_to_plex.append(match)
+                        break
+            except Exception as e:
+                warn(f"  [yellow]Warning: Could not search for '{_safe(title)}': {_safe(e)}[/]")
+
+    return movies_to_trakt, shows_to_trakt, items_to_plex, len(plex_watchlist)
+
+
 _file_logger: logging.Logger | None = None
 
 
 def get_file_logger() -> logging.Logger:
-    """Get or create the file logger."""
+    """Get the pakt logger, writing every pakt module's messages to a rotating sync.log."""
     global _file_logger
     if _file_logger is None:
-        log_dir = get_config_dir()
-        log_file = log_dir / "sync.log"
-
-        _file_logger = logging.getLogger("pakt.sync")
-        _file_logger.setLevel(logging.DEBUG)
-
-        # Rotate log if too big (>5MB)
-        if log_file.exists() and log_file.stat().st_size > 5 * 1024 * 1024:
-            old_log = log_dir / "sync.log.old"
-            if old_log.exists():
-                old_log.unlink()
-            log_file.rename(old_log)
-
-        handler = logging.FileHandler(log_file, encoding="utf-8")
+        log_file = get_config_dir() / "sync.log"
+        log_file.touch(exist_ok=True)
+        if os.name != "nt":
+            log_file.chmod(0o600)
+        handler = logging.handlers.RotatingFileHandler(
+            log_file, maxBytes=LOG_MAX_BYTES, backupCount=1, encoding="utf-8"
+        )
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        _file_logger = logging.getLogger("pakt")
+        _file_logger.setLevel(logging.INFO)
         _file_logger.addHandler(handler)
-
     return _file_logger
 
 
-def _is_watched_episode(ep_data: dict) -> bool:
-    """Whether a Trakt episode entry is actually watched.
+def _emit(markup: str, log_callback: Callable[[str], None] | None) -> None:
+    """Emit a markup line to the console, and its plain text to sync.log and the caller."""
+    try:
+        plain = Text.from_markup(markup).plain
+    except MarkupError:
+        plain, markup = markup, escape(markup)
+    get_file_logger().info(plain)
+    console.print(markup)
+    if log_callback:
+        log_callback(plain)
 
-    ``extended=progress`` can list every episode of a show with a ``completed``
-    flag, so presence in the response is not proof of a play.
-    """
+
+@contextlib.contextmanager
+def _sync_lock() -> Generator[bool, None, None]:
+    """Hold the config folder's sync lock, one process at a time; yields False when taken."""
+    handle = open(get_config_dir() / "sync.lock", "a+")
+    try:
+        handle.seek(0)
+        if sys.platform == "win32":
+            import msvcrt
+
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        handle.close()
+        yield False
+        return
+    try:
+        yield True
+    finally:
+        handle.close()
+
+
+def _is_watched_episode(ep_data: dict) -> bool:
+    """Whether a Trakt episode is watched; extended=progress also lists unwatched ones."""
     completed = ep_data.get("completed")
     if completed is False:
         return False
@@ -265,11 +354,7 @@ def _is_watched_episode(ep_data: dict) -> bool:
 
 
 def _plex_dt_to_utc_iso(dt: datetime | None) -> str | None:
-    """Convert a naive local datetime from PlexAPI to UTC ISO 8601 for Trakt.
-
-    PlexAPI uses datetime.fromtimestamp() which gives naive local time.
-    We assume local timezone and convert to UTC for Trakt.
-    """
+    """Convert PlexAPI's naive local datetime to the UTC ISO 8601 form Trakt takes."""
     if dt is None:
         return None
     # PlexAPI gives naive local time; astimezone() assumes local if no tzinfo
@@ -292,7 +377,6 @@ class SyncEngine:
         trakt_cache: TraktCache | None = None,
         pushed: PushedToTrakt | None = None,
     ):
-        """``trakt_cache`` is shared across servers so a multi-server run fetches Trakt once."""
         self.config = config
         self.trakt = trakt
         self.plex = plex
@@ -301,9 +385,8 @@ class SyncEngine:
         self._verbose = verbose
         self._server_name = server_name
         self._server_config = server_config
-        self._trakt_cache = trakt_cache
+        self._cache = trakt_cache or TraktCache()
         self._pushed = pushed or PushedToTrakt()
-        self._account_limits: AccountLimits | None = None
         self._fix_collection_dates = False
 
     def _get_sync_option(self, option: str) -> bool:
@@ -311,6 +394,11 @@ class SyncEngine:
         if self._server_config:
             return self._server_config.get_sync_option(option, self.config.sync)
         return getattr(self.config.sync, option)
+
+    def _options(self) -> dict[str, bool]:
+        """Every on/off sync option for this server, by name."""
+        return {name: self._get_sync_option(name) for name in type(self.config.sync).model_fields
+                if name != "rating_priority"}
 
     def _get_movie_libraries(self) -> list[str] | None:
         """Get movie libraries to sync (server-specific or global)."""
@@ -324,124 +412,96 @@ class SyncEngine:
             return self._server_config.show_libraries
         return None
 
-    async def _get_account_limits(self) -> AccountLimits:
-        """Fetch and cache account limits."""
-        if self._trakt_cache and self._trakt_cache.account_limits:
-            return self._trakt_cache.account_limits
-        if self._account_limits is None:
-            self._account_limits = await self.trakt.get_account_limits()
-        return self._account_limits
-
     def _is_cancelled(self) -> bool:
         """Check if sync has been cancelled."""
         return self._cancel_check() if self._cancel_check else False
 
     def _log(self, msg: str) -> None:
-        """Log a message to console, callback, and file."""
-        # Add server name prefix if set
+        """Log a markup message to console, callback and sync.log, prefixed with the server."""
         if self._server_name:
-            display_msg = f"[dim][{self._server_name}][/] {msg}"
-        else:
-            display_msg = msg
-
-        # Strip rich markup tags but preserve non-markup brackets like [2019-06-17]
-        clean_msg = re.sub(r'\[/\]|\[/?[a-zA-Z#][^\]]*\]', '', display_msg)
-
-        # Always log to file
-        get_file_logger().info(clean_msg)
-
-        # Console and callback
-        console.print(display_msg)
-        if self._log_callback:
-            self._log_callback(clean_msg)
+            msg = f"[dim]{_safe(f'[{self._server_name}]')}[/] {msg}"
+        _emit(msg, self._log_callback)
 
     def _progress(self, phase: int, total_phases: int, percent: float, label: str = "") -> None:
         """Send progress update to callback and log."""
-        # Calculate overall progress across all phases
         phase_weight = 100 / total_phases
         overall = ((phase - 1) * phase_weight) + (percent / 100 * phase_weight)
-
         if self._log_callback:
             self._log_callback(f"PROGRESS:{phase}:{overall:.1f}:{label}")
+
+    async def _fetch_plex(
+        self, fetch: Callable[[list[str] | None], tuple[list, dict[str, int]]],
+        libraries: list[str] | None, warn: bool = True,
+    ) -> tuple[list, dict[str, int]]:
+        """Fetch Plex items off the event loop, warning about configured libraries it lacks."""
+        items, counts = await asyncio.to_thread(fetch, libraries)
+        for name in (libraries or []) if warn else []:
+            if name not in counts:
+                self._log(f"  [yellow]Library '{_safe(name)}' not found on this server[/]")
+        return items, counts
+
+    async def _push(self, message: str, send: Callable[..., Awaitable[dict]], **lists: list[dict]) -> dict:
+        """Push items to Trakt, logging the request and anything Trakt could not match."""
+        if not any(lists.values()):
+            return {}
+        self._log(f"  {message}...")
+        response = await send(**lists)
+        not_found = [i for items in (response.get("not_found") or {}).values() if isinstance(items, list)
+                     for i in items]
+        if not_found:
+            self._log(f"  [yellow]Trakt could not match {len(not_found)} item(s)[/]")
+            if self._verbose:
+                for item in not_found:
+                    self._log(f"    [dim]→ Not found: {_safe(item.get('title') or item.get('ids'))}[/]")
+        return response
+
+    async def _write_plex(self, message: str, write: Callable[[list], list], items: list, result: SyncResult) -> int:
+        """Write a Plex batch off the event loop; returns successes, recording failures."""
+        if not items:
+            return 0
+        self._log(f"  {message}...")
+        failed = await asyncio.to_thread(write, items)
+        if failed:
+            names = ", ".join(_safe(getattr(entry[0], "title", "?")) for entry in failed[:5])
+            self._log(f"  [yellow]{len(failed)} Plex update(s) failed: {names}[/]")
+            result.errors.append(f"{len(failed)} Plex updates failed ({message.lower()})")
+        return len(items) - len(failed)
 
     async def _sync_movies(self, result: SyncResult, dry_run: bool) -> bool:
         """Sync movies. Returns False if cancelled."""
         phase_start = time.time()
         self._log("\n[cyan]Phase 1:[/] Syncing movies...")
-        self._progress(1, 4, 0, "Fetching movie data")
-
-        # Fetch Trakt movie data (use cache if available)
-        with Progress(
-            SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-            transient=True, console=console
-        ) as progress:
-            if self._trakt_cache:
-                trakt_watched_movies = self._trakt_cache.watched_movies
-                trakt_movie_ratings = self._trakt_cache.movie_ratings
-                self._progress(1, 4, 15, "Using cached Trakt data")
-            else:
-                task = progress.add_task("Fetching Trakt watched movies...", total=None)
-                self._progress(1, 4, 5, "Trakt watched movies")
-                trakt_watched_movies = await self.trakt.get_watched_movies()
-                progress.update(task, description=f"Got {len(trakt_watched_movies)} watched movies")
-
-                task = progress.add_task("Fetching Trakt movie ratings...", total=None)
-                self._progress(1, 4, 15, "Trakt movie ratings")
-                trakt_movie_ratings = await self.trakt.get_movie_ratings()
-                progress.update(task, description=f"Got {len(trakt_movie_ratings)} movie ratings")
-
-            task = progress.add_task("Fetching Plex movies...", total=None)
-            self._progress(1, 4, 25, "Plex movies")
-            # Run in thread to not block event loop (allows web UI updates)
-            plex_movies, movie_libs = await asyncio.to_thread(
-                self.plex.get_all_movies_with_counts, self._get_movie_libraries()
-            )
-            progress.update(task, description=f"Got {len(plex_movies)} movies from Plex")
+        self._progress(1, 4, 5, "Trakt watched movies")
+        trakt_watched_movies = await self._cache.get(self.trakt.get_watched_movies)
+        self._progress(1, 4, 15, "Trakt movie ratings")
+        trakt_movie_ratings = await self._cache.get(self.trakt.get_movie_ratings)
+        self._progress(1, 4, 25, "Plex movies")
+        plex_movies, movie_libs = await self._fetch_plex(
+            self.plex.get_all_movies_with_counts, self._get_movie_libraries()
+        )
 
         self._log(f"  Trakt: {len(trakt_watched_movies)} watched, {len(trakt_movie_ratings)} ratings")
         for lib_name, count in movie_libs.items():
-            self._log(f"  Plex [{lib_name}]: {count} movies")
+            self._log(f"  Plex {_safe(f'[{lib_name}]')}: {count} movies")
 
-        # Build indices
-        trakt_watched_by_imdb: dict[str, dict] = {}
-        trakt_watched_by_tmdb: dict[int, dict] = {}
-        for item in trakt_watched_movies:
-            if item.movie:
-                ids = item.movie.get("ids", {})
-                data = {"item": item, "movie": item.movie}
-                if ids.get("imdb"):
-                    trakt_watched_by_imdb[ids["imdb"]] = data
-                if ids.get("tmdb"):
-                    trakt_watched_by_tmdb[ids["tmdb"]] = data
+        watched_keys = {key for item in trakt_watched_movies if item.movie
+                        for key in _id_keys(item.movie.get("ids", {}), MOVIE_ID_TYPES)}
+        rating_by_key = {key: item.rating for item in trakt_movie_ratings if item.movie
+                         for key in _id_keys(item.movie.get("ids", {}), MOVIE_ID_TYPES)}
 
-        trakt_ratings_by_imdb: dict[str, dict] = {}
-        trakt_ratings_by_tmdb: dict[int, dict] = {}
-        for item in trakt_movie_ratings:
-            if item.movie:
-                ids = item.movie.get("ids", {})
-                data = {"rating": item.rating, "rated_at": item.rated_at}
-                if ids.get("imdb"):
-                    trakt_ratings_by_imdb[ids["imdb"]] = data
-                if ids.get("tmdb"):
-                    trakt_ratings_by_tmdb[ids["tmdb"]] = data
-
-        # Free raw Trakt data
-        del trakt_watched_movies, trakt_movie_ratings
-        gc.collect()
-
-        # Process movies (deduplicate by external ID for multi-library setups)
-        movies_to_mark_watched_trakt: list[dict] = []
-        movies_to_mark_watched_plex: list[Any] = []
-        movies_to_rate_trakt: list[dict] = []
-        movies_to_rate_plex: list[tuple[Any, int]] = []
-        processed_movie_ids: set[str] = set()
+        options = self._options()
+        priority = self.config.sync.rating_priority
         pushed = self._pushed
+        to_trakt_watched: list[dict] = []
+        to_trakt_rated: list[dict] = []
+        to_plex_watched: list[Any] = []
+        to_plex_rated: list[tuple[Any, int]] = []
+        queued_watched: set[tuple] = set()
+        queued_rated: set[tuple] = set()
+        no_ids = 0
 
         total_movies = len(plex_movies)
         self._log(f"  Processing {total_movies} movies...")
-        processed = 0
-
-        # Update progress display every 1%, but yield to event loop more often for cancellation
         update_interval = max(1, total_movies // 100)
         yield_interval = max(1, min(500, total_movies // 200))
 
@@ -450,386 +510,222 @@ class SyncEngine:
             BarColumn(), TaskProgressColumn(), console=console, transient=False
         ) as progress:
             task = progress.add_task(f"Movies 0/{total_movies}", total=total_movies)
+            for i, plex_movie in enumerate(plex_movies):
+                if i % yield_interval == 0:
+                    await asyncio.sleep(0)
+                    if self._is_cancelled():
+                        self._log("  [yellow]Cancelled[/]")
+                        return False
+                if i % update_interval == 0:
+                    self._progress(1, 4, 30 + (i / total_movies) * 40, f"Movies {i}/{total_movies}")
+                    progress.update(task, completed=i, description=f"Movies {i}/{total_movies}")
 
-            while plex_movies:
-                chunk = plex_movies[:2000]
-                plex_movies = plex_movies[2000:]
+                plex_ids = extract_plex_ids(plex_movie)
+                keys = _id_keys(plex_ids, MOVIE_ID_TYPES)
+                if not keys:
+                    no_ids += 1
+                    continue
+                movie_key = keys[0]
+                trakt_watched = any(key in watched_keys for key in keys)
+                trakt_rating = next((rating_by_key[key] for key in keys if key in rating_by_key), None)
 
-                for plex_movie in chunk:
-                    # Yield to event loop frequently for responsive cancellation
-                    if processed % yield_interval == 0:
-                        await asyncio.sleep(0)
-                        if self._is_cancelled():
-                            self._log("  [yellow]Cancelled[/]")
-                            return False
+                if plex_movie.isWatched and not trakt_watched:
+                    if (options["watched_plex_to_trakt"] and movie_key not in pushed.watched_movies
+                            and movie_key not in queued_watched):
+                        movie = _trakt_item(plex_movie, plex_ids, MOVIE_ID_TYPES) or {}
+                        watched_at = _plex_dt_to_utc_iso(plex_movie.lastViewedAt)
+                        if watched_at:
+                            movie["watched_at"] = watched_at
+                        to_trakt_watched.append(movie)
+                        queued_watched.add(movie_key)
+                elif trakt_watched and not plex_movie.isWatched and options["watched_trakt_to_plex"]:
+                    to_plex_watched.append(plex_movie)
 
-                    # Update display less frequently (1%)
-                    if processed % update_interval == 0:
-                        self._progress(1, 4, 30 + (processed / total_movies) * 40, f"Movies {processed}/{total_movies}")
-                        progress.update(task, completed=processed, description=f"Movies {processed}/{total_movies}")
+                plex_rating = int(plex_movie.userRating) if plex_movie.userRating else None
+                send, fetch = _rating_direction(
+                    plex_rating, trakt_rating, priority,
+                    options["ratings_plex_to_trakt"], options["ratings_trakt_to_plex"],
+                )
+                if send and movie_key not in pushed.rated_movies and movie_key not in queued_rated:
+                    movie = _trakt_item(plex_movie, plex_ids, MOVIE_ID_TYPES) or {}
+                    movie["rating"] = plex_rating
+                    rated_at = _plex_dt_to_utc_iso(plex_movie.lastRatedAt)
+                    if rated_at:
+                        movie["rated_at"] = rated_at
+                    to_trakt_rated.append(movie)
+                    queued_rated.add(movie_key)
+                elif fetch and trakt_rating is not None:
+                    to_plex_rated.append((plex_movie, trakt_rating))
+            progress.update(task, completed=total_movies, description=f"Movies {total_movies}/{total_movies}")
 
-                    plex_ids = extract_plex_ids(plex_movie)
+        del plex_movies
+        gc.collect()
 
-                    # Same movie in several libraries: Trakt needs it once, but each Plex
-                    # copy still needs its own write or the other copies stay unwatched.
-                    movie_key = plex_ids.imdb or (f"tmdb:{plex_ids.tmdb}" if plex_ids.tmdb else None)
-                    duplicate = False
-                    if movie_key:
-                        duplicate = movie_key in processed_movie_ids
-                        processed_movie_ids.add(movie_key)
-
-                    skip_watched_push = duplicate or (movie_key in pushed.watched_movies)
-                    skip_rating_push = duplicate or (movie_key in pushed.rated_movies)
-
-                    trakt_data = None
-                    if plex_ids.imdb and plex_ids.imdb in trakt_watched_by_imdb:
-                        trakt_data = trakt_watched_by_imdb[plex_ids.imdb]
-                    elif plex_ids.tmdb and plex_ids.tmdb in trakt_watched_by_tmdb:
-                        trakt_data = trakt_watched_by_tmdb[plex_ids.tmdb]
-
-                    trakt_rating = None
-                    if plex_ids.imdb and plex_ids.imdb in trakt_ratings_by_imdb:
-                        trakt_rating = trakt_ratings_by_imdb[plex_ids.imdb]
-                    elif plex_ids.tmdb and plex_ids.tmdb in trakt_ratings_by_tmdb:
-                        trakt_rating = trakt_ratings_by_tmdb[plex_ids.tmdb]
-
-                    plex_watched = plex_movie.isWatched
-                    trakt_watched = trakt_data is not None
-
-                    if (plex_watched and not trakt_watched and not skip_watched_push
-                            and self._get_sync_option("watched_plex_to_trakt")):
-                        movie_data = self._build_trakt_movie(plex_movie, plex_ids)
-                        if movie_data:
-                            watched_at = _plex_dt_to_utc_iso(plex_movie.lastViewedAt)
-                            if watched_at:
-                                movie_data["watched_at"] = watched_at
-                            movies_to_mark_watched_trakt.append(movie_data)
-                            if not dry_run and movie_key:
-                                pushed.watched_movies.add(movie_key)
-                    elif trakt_watched and not plex_watched and self._get_sync_option("watched_trakt_to_plex"):
-                        movies_to_mark_watched_plex.append(plex_movie)
-
-                    plex_rating = int(plex_movie.userRating) if plex_movie.userRating else None
-                    trakt_rating_val = trakt_rating["rating"] if trakt_rating else None
-
-                    if (plex_rating and not trakt_rating_val and not skip_rating_push
-                            and self._get_sync_option("ratings_plex_to_trakt")):
-                        movie_data = self._build_trakt_movie(plex_movie, plex_ids)
-                        if movie_data:
-                            movie_data["rating"] = plex_rating
-                            rated_at = _plex_dt_to_utc_iso(plex_movie.lastRatedAt)
-                            if rated_at:
-                                movie_data["rated_at"] = rated_at
-                            movies_to_rate_trakt.append(movie_data)
-                            if not dry_run and movie_key:
-                                pushed.rated_movies.add(movie_key)
-                    elif trakt_rating_val and not plex_rating and self._get_sync_option("ratings_trakt_to_plex"):
-                        movies_to_rate_plex.append((plex_movie, trakt_rating_val))
-                    elif plex_rating and trakt_rating_val and plex_rating != trakt_rating_val:
-                        priority = self.config.sync.rating_priority
-                        if (priority == "plex" and not skip_rating_push
-                                and self._get_sync_option("ratings_plex_to_trakt")):
-                            movie_data = self._build_trakt_movie(plex_movie, plex_ids)
-                            if movie_data:
-                                movie_data["rating"] = plex_rating
-                                rated_at = _plex_dt_to_utc_iso(plex_movie.lastRatedAt)
-                                if rated_at:
-                                    movie_data["rated_at"] = rated_at
-                                movies_to_rate_trakt.append(movie_data)
-                                if not dry_run and movie_key:
-                                    pushed.rated_movies.add(movie_key)
-                        elif priority == "trakt" and self._get_sync_option("ratings_trakt_to_plex"):
-                            movies_to_rate_plex.append((plex_movie, trakt_rating_val))
-
-                    processed += 1
-
-                del chunk
-                gc.collect()
-
-        self._log(f"  Movies - To mark watched on Trakt: {len(movies_to_mark_watched_trakt)}")
-        self._log(f"  Movies - To mark watched on Plex: {len(movies_to_mark_watched_plex)}")
-        self._log(f"  Movies - To rate on Trakt: {len(movies_to_rate_trakt)}")
-        self._log(f"  Movies - To rate on Plex: {len(movies_to_rate_plex)}")
+        if no_ids:
+            self._log(f"  [yellow]Skipped {no_ids} movies without IMDb or TMDB IDs[/]")
+        self._log(f"  Movies - To mark watched on Trakt: {len(to_trakt_watched)}")
+        self._log(f"  Movies - To mark watched on Plex: {len(to_plex_watched)}")
+        self._log(f"  Movies - To rate on Trakt: {len(to_trakt_rated)}")
+        self._log(f"  Movies - To rate on Plex: {len(to_plex_rated)}")
 
         if self._verbose:
-            for m in movies_to_mark_watched_trakt:
-                self._log(f"    [dim]→ Trakt watched: {m.get('title')} ({m.get('year')})[/]")
-            for m in movies_to_mark_watched_plex:
-                self._log(f"    [dim]→ Plex watched: {m.title} ({m.year})[/]")
-            for m in movies_to_rate_trakt:
-                self._log(f"    [dim]→ Trakt rating: {m.get('title')} ({m.get('year')}) = {m.get('rating')}[/]")
-            for m, rating in movies_to_rate_plex:
-                self._log(f"    [dim]→ Plex rating: {m.title} ({m.year}) = {rating}[/]")
+            for m in to_trakt_watched:
+                self._log(f"    [dim]→ Trakt watched: {_safe(m.get('title'))} ({m.get('year')})[/]")
+            for m in to_plex_watched:
+                self._log(f"    [dim]→ Plex watched: {_safe(m.title)} ({m.year})[/]")
+            for m in to_trakt_rated:
+                self._log(f"    [dim]→ Trakt rating: {_safe(m.get('title'))} ({m.get('year')}) = {m.get('rating')}[/]")
+            for m, rating in to_plex_rated:
+                self._log(f"    [dim]→ Plex rating: {_safe(m.title)} ({m.year}) = {rating}[/]")
 
-        # Apply changes
         if not dry_run:
             self._progress(1, 4, 75, "Applying movie changes")
-            if movies_to_mark_watched_trakt:
-                self._log(f"  Adding {len(movies_to_mark_watched_trakt)} movies to Trakt history...")
-                response = await self.trakt.add_to_history(movies=movies_to_mark_watched_trakt)
-                result.added_to_trakt += response.get("added", {}).get("movies", 0)
-
-            if movies_to_rate_trakt:
-                self._log(f"  Adding {len(movies_to_rate_trakt)} movie ratings to Trakt...")
-                response = await self.trakt.add_ratings(movies=movies_to_rate_trakt)
-                result.ratings_synced += response.get("added", {}).get("movies", 0)
-
-            if movies_to_mark_watched_plex:
-                self._log(f"  Marking {len(movies_to_mark_watched_plex)} movies watched on Plex...")
-                failed = await asyncio.to_thread(self.plex.mark_watched_batch, movies_to_mark_watched_plex)
-                result.added_to_plex += len(movies_to_mark_watched_plex) - len(failed)
-
-            if movies_to_rate_plex:
-                self._log(f"  Rating {len(movies_to_rate_plex)} movies on Plex...")
-                failed = await asyncio.to_thread(self.plex.rate_batch, movies_to_rate_plex)
-                result.ratings_synced += len(movies_to_rate_plex) - len(failed)
+            response = await self._push(
+                f"Adding {len(to_trakt_watched)} movies to Trakt history",
+                self.trakt.add_to_history, movies=to_trakt_watched,
+            )
+            result.added_to_trakt += response.get("added", {}).get("movies", 0)
+        pushed.watched_movies |= queued_watched
+        if not dry_run:
+            response = await self._push(
+                f"Adding {len(to_trakt_rated)} movie ratings to Trakt", self.trakt.add_ratings, movies=to_trakt_rated,
+            )
+            result.ratings_synced += response.get("added", {}).get("movies", 0)
+        pushed.rated_movies |= queued_rated
+        if not dry_run:
+            result.added_to_plex += await self._write_plex(
+                f"Marking {len(to_plex_watched)} movies watched on Plex",
+                self.plex.mark_watched_batch, to_plex_watched, result,
+            )
+            result.ratings_synced += await self._write_plex(
+                f"Rating {len(to_plex_rated)} movies on Plex", self.plex.rate_batch, to_plex_rated, result,
+            )
 
         self._progress(1, 4, 100, "Movies complete")
         self._log(f"  [dim]Phase 1 completed in {time.time() - phase_start:.1f}s[/]")
-
-        # Free all movie data
-        del movies_to_mark_watched_trakt, movies_to_mark_watched_plex
-        del movies_to_rate_trakt, movies_to_rate_plex
-        del trakt_watched_by_imdb, trakt_watched_by_tmdb
-        del trakt_ratings_by_imdb, trakt_ratings_by_tmdb
-        gc.collect()
-
         return True
 
     async def _sync_episodes(self, result: SyncResult, dry_run: bool) -> bool:
         """Sync episodes. Returns False if cancelled."""
         phase_start = time.time()
         self._log("\n[cyan]Phase 2:[/] Syncing episodes...")
-        self._progress(2, 4, 0, "Fetching episode data")
-
-        # Fetch Trakt episode data (use cache if available)
-        with Progress(
-            SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-            transient=True, console=console
-        ) as progress:
-            if self._trakt_cache:
-                trakt_watched_shows = self._trakt_cache.watched_shows
-                trakt_episode_ratings_list = self._trakt_cache.episode_ratings
-                self._progress(2, 4, 15, "Using cached Trakt data")
-            else:
-                task = progress.add_task("Fetching Trakt watched shows...", total=None)
-                self._progress(2, 4, 5, "Trakt watched shows")
-                trakt_watched_shows = await self.trakt.get_watched_shows()
-                progress.update(task, description=f"Got {len(trakt_watched_shows)} watched shows")
-
-                task = progress.add_task("Fetching Trakt episode ratings...", total=None)
-                self._progress(2, 4, 15, "Trakt episode ratings")
-                trakt_episode_ratings_list = await self.trakt.get_episode_ratings()
-                progress.update(task, description=f"Got {len(trakt_episode_ratings_list)} episode ratings")
-
-            task = progress.add_task("Fetching Plex shows...", total=None)
-            self._progress(2, 4, 25, "Plex shows")
-            # Run in thread to not block event loop (allows web UI updates)
-            plex_shows, show_libs = await asyncio.to_thread(
-                self.plex.get_all_shows_with_counts, self._get_show_libraries()
-            )
-            progress.update(task, description=f"Got {len(plex_shows)} shows from Plex")
-
-            task = progress.add_task("Fetching Plex episodes...", total=None)
-            self._progress(2, 4, 30, "Plex episodes")
-            # Run in thread to not block event loop (allows web UI updates)
-            plex_episodes, episode_libs = await asyncio.to_thread(
-                self.plex.get_all_episodes_with_counts, self._get_show_libraries()
-            )
-            progress.update(task, description=f"Got {len(plex_episodes)} episodes from Plex")
+        self._progress(2, 4, 5, "Trakt watched shows")
+        trakt_watched_shows = await self._cache.get(self.trakt.get_watched_shows)
+        self._progress(2, 4, 15, "Trakt episode ratings")
+        trakt_episode_ratings = await self._cache.get(self.trakt.get_episode_ratings)
+        self._progress(2, 4, 25, "Plex shows")
+        plex_shows, show_libs = await self._fetch_plex(
+            self.plex.get_all_shows_with_counts, self._get_show_libraries()
+        )
+        self._progress(2, 4, 30, "Plex episodes")
+        plex_episodes, episode_libs = await self._fetch_plex(
+            self.plex.get_all_episodes_with_counts, self._get_show_libraries(), warn=False
+        )
 
         self._log(
-            f"  Trakt: {len(trakt_watched_shows)} watched shows, "
-            f"{len(trakt_episode_ratings_list)} episode ratings"
+            f"  Trakt: {len(trakt_watched_shows)} watched shows, {len(trakt_episode_ratings)} episode ratings"
         )
         for lib_name, count in show_libs.items():
-            ep_count = episode_libs.get(lib_name, 0)
-            self._log(f"  Plex [{lib_name}]: {count} shows, {ep_count} episodes")
+            self._log(f"  Plex {_safe(f'[{lib_name}]')}: {count} shows, {episode_libs.get(lib_name, 0)} episodes")
 
-        # Build indices
-        plex_show_ids_by_key: dict[str, PlexIds] = {}
-        for show in plex_shows:
-            plex_show_ids_by_key[str(show.ratingKey)] = extract_plex_ids(show)
+        plex_show_ids_by_key = {str(show.ratingKey): extract_plex_ids(show) for show in plex_shows}
         del plex_shows
-        gc.collect()
 
-        trakt_watched_episodes: dict[tuple, dict] = {}
-        n_trakt_shows = len(trakt_watched_shows)
-        for show_item in trakt_watched_shows:
-            if not show_item.show:
-                continue
-            show_ids = show_item.show.get("ids", {})
-            tvdb_id = show_ids.get("tvdb")
-            imdb_id = show_ids.get("imdb")
-            for season_data in show_item.seasons or []:
-                season_num = season_data.get("number", 0)
-                for ep_data in season_data.get("episodes", []):
-                    if not _is_watched_episode(ep_data):
-                        continue
-                    ep_num = ep_data.get("number", 0)
-                    data = {"show": show_item.show, "last_watched_at": ep_data.get("last_watched_at")}
-                    if tvdb_id:
-                        trakt_watched_episodes[(tvdb_id, season_num, ep_num)] = data
-                    if imdb_id:
-                        trakt_watched_episodes[(imdb_id, season_num, ep_num)] = data
-        del trakt_watched_shows
-        gc.collect()
-
-        # An empty index against a non-empty show list means the response shape changed under us.
-        # Syncing on it would mark everything unwatched on one side, so stop instead.
-        if n_trakt_shows and not trakt_watched_episodes:
+        watched_index = _episode_index(trakt_watched_shows)
+        # shows without episodes mean a changed response shape; syncing on it would unwatch all
+        if trakt_watched_shows and not watched_index:
             self._log(
-                f"ERROR:Trakt returned {n_trakt_shows} watched shows but no watched episodes. "
+                f"ERROR:Trakt returned {len(trakt_watched_shows)} watched shows but no watched episodes. "
                 "Skipping episode sync rather than acting on empty data."
             )
             return True
+        ratings_index = _episode_ratings(trakt_episode_ratings)
 
-        trakt_episode_ratings: dict[tuple, dict] = {}
-        for item in trakt_episode_ratings_list:
-            if not item.episode or not item.show:
-                continue
-            show_ids = item.show.get("ids", {})
-            ep_data = item.episode
-            season_num = ep_data.get("season", 0)
-            ep_num = ep_data.get("number", 0)
-            rating_data = {"rating": item.rating, "rated_at": item.rated_at}
-            if show_ids.get("tvdb"):
-                trakt_episode_ratings[(show_ids["tvdb"], season_num, ep_num)] = rating_data
-            if show_ids.get("imdb"):
-                trakt_episode_ratings[(show_ids["imdb"], season_num, ep_num)] = rating_data
-        del trakt_episode_ratings_list
-        gc.collect()
-
-        # Process episodes in a thread to not block the event loop
         total_episodes = len(plex_episodes)
         self._log(f"  Processing {total_episodes} episodes...")
-
-        # Create cancellation event for thread
         cancel_event = threading.Event()
-
-        # Progress state for thread callback
-        progress_state = {"processed": 0, "total": total_episodes}
+        progress_state = {"processed": 0}
 
         def on_progress(processed: int, total: int) -> None:
             """Called from the worker thread; only touches plain dict entries."""
             progress_state["processed"] = processed
-            progress_state["total"] = total
 
-        # Start processing in thread
-        process_task = asyncio.create_task(
-            asyncio.to_thread(
-                _process_episodes_in_thread,
-                plex_episodes,
-                plex_show_ids_by_key,
-                trakt_watched_episodes,
-                trakt_episode_ratings,
-                self._get_sync_option("watched_plex_to_trakt"),
-                self._get_sync_option("watched_trakt_to_plex"),
-                self._get_sync_option("ratings_plex_to_trakt"),
-                self._get_sync_option("ratings_trakt_to_plex"),
-                self.config.sync.rating_priority,
-                cancel_event,
-                self._pushed,
-                dry_run,
-                on_progress,
-            )
-        )
+        process_task = asyncio.create_task(asyncio.to_thread(
+            _process_episodes_in_thread,
+            plex_episodes, plex_show_ids_by_key, watched_index, ratings_index, self._options(),
+            self.config.sync.rating_priority, cancel_event, self._pushed, on_progress,
+        ))
 
-        # Poll for progress and cancellation while thread runs
         with Progress(
             SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
             BarColumn(), TaskProgressColumn(), console=console, transient=False
         ) as progress:
             task = progress.add_task(f"Episodes 0/{total_episodes}", total=total_episodes)
-
             while not process_task.done():
-                # Check for cancellation
-                if self._is_cancelled():
+                if self._is_cancelled() and not cancel_event.is_set():
                     cancel_event.set()
                     self._log("  [yellow]Cancelling...[/]")
-
-                # Update progress display
                 processed = progress_state["processed"]
-                pct = 35 + (processed / max(1, total_episodes)) * 50
-                self._progress(2, 4, pct, f"Episodes {processed}/{total_episodes}")
+                self._progress(2, 4, 35 + (processed / max(1, total_episodes)) * 50,
+                               f"Episodes {processed}/{total_episodes}")
                 progress.update(task, completed=processed, description=f"Episodes {processed}/{total_episodes}")
-
-                # Small sleep to not busy-wait
                 await asyncio.sleep(0.1)
-
-            # Final progress update
             progress.update(task, completed=total_episodes, description=f"Episodes {total_episodes}/{total_episodes}")
 
-        # Get result from thread
         ep_result = await process_task
-
-        if ep_result.cancelled:
+        del plex_episodes, plex_show_ids_by_key, watched_index, ratings_index
+        gc.collect()
+        if ep_result.cancelled or self._is_cancelled():
             self._log("  [yellow]Cancelled[/]")
             return False
 
-        # Extract results
-        episodes_to_mark_watched_trakt = ep_result.episodes_to_mark_watched_trakt
-        episodes_to_mark_watched_trakt_display = ep_result.episodes_to_mark_watched_trakt_display
-        episodes_to_mark_watched_plex = ep_result.episodes_to_mark_watched_plex
-        episodes_to_rate_trakt = ep_result.episodes_to_rate_trakt
-        episodes_to_rate_trakt_display = ep_result.episodes_to_rate_trakt_display
-        episodes_to_rate_plex = ep_result.episodes_to_rate_plex
-
-        if ep_result.skipped_no_ids > 0:
+        if ep_result.skipped_no_ids:
             self._log(f"  [yellow]Skipped {ep_result.skipped_no_ids} episodes without show IDs[/]")
-
-        self._log(f"  Episodes - To mark watched on Trakt: {len(episodes_to_mark_watched_trakt)}")
-        self._log(f"  Episodes - To mark watched on Plex: {len(episodes_to_mark_watched_plex)}")
-        self._log(f"  Episodes - To rate on Trakt: {len(episodes_to_rate_trakt)}")
-        self._log(f"  Episodes - To rate on Plex: {len(episodes_to_rate_plex)}")
+        if ep_result.skipped_no_number:
+            self._log(f"  [yellow]Skipped {ep_result.skipped_no_number} episodes without season or episode number[/]")
+        self._log(f"  Episodes - To mark watched on Trakt: {len(ep_result.watched_to_trakt)}")
+        self._log(f"  Episodes - To mark watched on Plex: {len(ep_result.watched_to_plex)}")
+        self._log(f"  Episodes - To rate on Trakt: {len(ep_result.rated_to_trakt)}")
+        self._log(f"  Episodes - To rate on Plex: {len(ep_result.rated_to_plex)}")
 
         if self._verbose:
-            for display in episodes_to_mark_watched_trakt_display:
-                self._log(f"    [dim]→ Trakt watched: {display}[/]")
-            for ep in episodes_to_mark_watched_plex:
-                ep_code = f"S{ep.seasonNumber:02d}E{ep.episodeNumber:02d}"
-                self._log(f"    [dim]→ Plex watched: {ep.grandparentTitle} {ep_code}[/]")
-            for display in episodes_to_rate_trakt_display:
-                self._log(f"    [dim]→ Trakt rating: {display}[/]")
-            for ep, rating in episodes_to_rate_plex:
-                ep_code = f"S{ep.seasonNumber:02d}E{ep.episodeNumber:02d}"
-                self._log(f"    [dim]→ Plex rating: {ep.grandparentTitle} {ep_code} = {rating}[/]")
+            for *_, label in ep_result.watched_to_trakt:
+                self._log(f"    [dim]→ Trakt watched: {_safe(label)}[/]")
+            for _, label in ep_result.watched_to_plex:
+                self._log(f"    [dim]→ Plex watched: {_safe(label)}[/]")
+            for *_, label in ep_result.rated_to_trakt:
+                self._log(f"    [dim]→ Trakt rating: {_safe(label)}[/]")
+            for *_, label in ep_result.rated_to_plex:
+                self._log(f"    [dim]→ Plex rating: {_safe(label)}[/]")
 
-        # Free indices before applying
-        del trakt_watched_episodes, trakt_episode_ratings, plex_show_ids_by_key
-        gc.collect()
-
-        # Apply changes
+        pushed = self._pushed
         if not dry_run:
             self._progress(2, 4, 90, "Applying episode changes")
-            if episodes_to_mark_watched_trakt:
-                self._log(f"  Adding {len(episodes_to_mark_watched_trakt)} shows to Trakt history...")
-                response = await self.trakt.add_to_history(shows=episodes_to_mark_watched_trakt)
-                result.added_to_trakt += response.get("added", {}).get("episodes", 0)
-
-            if episodes_to_rate_trakt:
-                self._log(f"  Adding {len(episodes_to_rate_trakt)} episode ratings to Trakt...")
-                response = await self.trakt.add_ratings(shows=episodes_to_rate_trakt)
-                result.ratings_synced += response.get("added", {}).get("episodes", 0)
-
-            if episodes_to_mark_watched_plex:
-                self._log(f"  Marking {len(episodes_to_mark_watched_plex)} episodes watched on Plex...")
-                failed = await asyncio.to_thread(self.plex.mark_watched_batch, episodes_to_mark_watched_plex)
-                result.added_to_plex += len(episodes_to_mark_watched_plex) - len(failed)
-
-            if episodes_to_rate_plex:
-                self._log(f"  Rating {len(episodes_to_rate_plex)} episodes on Plex...")
-                failed = await asyncio.to_thread(self.plex.rate_batch, episodes_to_rate_plex)
-                result.ratings_synced += len(episodes_to_rate_plex) - len(failed)
+            response = await self._push(
+                f"Adding {len(ep_result.watched_to_trakt)} episodes to Trakt history",
+                self.trakt.add_to_history, shows=_group_by_show(ep_result.watched_to_trakt),
+            )
+            result.added_to_trakt += response.get("added", {}).get("episodes", 0)
+        pushed.watched_episodes |= ep_result.watched_keys
+        if not dry_run:
+            response = await self._push(
+                f"Adding {len(ep_result.rated_to_trakt)} episode ratings to Trakt",
+                self.trakt.add_ratings, shows=_group_by_show(ep_result.rated_to_trakt),
+            )
+            result.ratings_synced += response.get("added", {}).get("episodes", 0)
+        pushed.rated_episodes |= ep_result.rated_keys
+        if not dry_run:
+            result.added_to_plex += await self._write_plex(
+                f"Marking {len(ep_result.watched_to_plex)} episodes watched on Plex",
+                self.plex.mark_watched_batch, [ep for ep, _ in ep_result.watched_to_plex], result,
+            )
+            result.ratings_synced += await self._write_plex(
+                f"Rating {len(ep_result.rated_to_plex)} episodes on Plex",
+                self.plex.rate_batch, [(ep, rating) for ep, rating, _ in ep_result.rated_to_plex], result,
+            )
 
         self._progress(2, 4, 100, "Episodes complete")
         self._log(f"  [dim]Phase 2 completed in {time.time() - phase_start:.1f}s[/]")
-
-        # Free all episode data
-        del episodes_to_mark_watched_trakt, episodes_to_mark_watched_plex
-        del episodes_to_rate_trakt, episodes_to_rate_plex
-        gc.collect()
-
         return True
 
     async def _sync_collection(self, result: SyncResult, dry_run: bool,
@@ -843,604 +739,254 @@ class SyncEngine:
         self._log("\n[cyan]Phase 3:[/] Syncing collection...")
         self._progress(3, 4, 0, "Fetching collection data")
 
-        # Check account limits first
-        limits = await self._get_account_limits()
+        limits = await self._cache.get(self.trakt.get_account_limits)
         if not limits.is_vip:
             self._log(f"  [yellow]Note: Free Trakt account (limit: {limits.collection_limit} items)[/]")
 
-        # Fetch Trakt collection (use cache if available)
-        with Progress(
-            SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-            transient=True, console=console
-        ) as progress:
-            if self._trakt_cache:
-                trakt_collection_movies = self._trakt_cache.collection_movies
-                trakt_collection_shows = self._trakt_cache.collection_shows
-                self._progress(3, 4, 10, "Using cached Trakt data")
-            else:
-                task = progress.add_task("Fetching Trakt collection...", total=None)
-                self._progress(3, 4, 5, "Trakt movie collection")
-                trakt_collection_movies = await self.trakt.get_collection_movies()
-                progress.update(task, description=f"Got {len(trakt_collection_movies)} collected movies")
+        self._progress(3, 4, 5, "Trakt collection")
+        trakt_collection_movies = await self._cache.get(self.trakt.get_collection_movies)
+        trakt_collection_shows = await self._cache.get(self.trakt.get_collection_shows)
+        plex_movies: list = []
+        plex_shows: list = []
+        plex_episodes: list = []
+        if not no_movies:
+            self._progress(3, 4, 15, "Plex movies")
+            plex_movies, _ = await self._fetch_plex(
+                self.plex.get_all_movies_with_counts, self._get_movie_libraries(), warn=False
+            )
+        if not no_shows:
+            self._progress(3, 4, 18, "Plex shows")
+            plex_shows, _ = await self._fetch_plex(
+                self.plex.get_all_shows_with_counts, self._get_show_libraries(), warn=False
+            )
+            self._progress(3, 4, 20, "Plex episodes")
+            plex_episodes, _ = await self._fetch_plex(
+                self.plex.get_all_episodes_with_counts, self._get_show_libraries(), warn=False
+            )
 
-                task = progress.add_task("Fetching Trakt show collection...", total=None)
-                self._progress(3, 4, 10, "Trakt show collection")
-                trakt_collection_shows = await self.trakt.get_collection_shows()
-                progress.update(task, description=f"Got {len(trakt_collection_shows)} collected shows")
-
-            if not no_movies:
-                task = progress.add_task("Fetching Plex movies...", total=None)
-                self._progress(3, 4, 15, "Plex movies")
-                plex_movies = await asyncio.to_thread(
-                    self.plex.get_all_movies, self._get_movie_libraries()
-                )
-                progress.update(task, description=f"Got {len(plex_movies)} movies")
-            else:
-                plex_movies = []
-
-            if not no_shows:
-                task = progress.add_task("Fetching Plex shows...", total=None)
-                self._progress(3, 4, 18, "Plex shows")
-                plex_shows = await asyncio.to_thread(
-                    self.plex.get_all_shows, self._get_show_libraries()
-                )
-                progress.update(task, description=f"Got {len(plex_shows)} shows")
-
-                task = progress.add_task("Fetching Plex episodes...", total=None)
-                self._progress(3, 4, 20, "Plex episodes")
-                plex_episodes = await asyncio.to_thread(
-                    self.plex.get_all_episodes, self._get_show_libraries()
-                )
-                progress.update(task, description=f"Got {len(plex_episodes)} episodes")
-            else:
-                plex_shows = []
-                plex_episodes = []
-
-        current_collection_count = len(trakt_collection_movies) + len(trakt_collection_shows)
+        current_count = len(trakt_collection_movies) + len(trakt_collection_shows)
         self._log(f"  Trakt collection: {len(trakt_collection_movies)} movies, {len(trakt_collection_shows)} shows")
         self._log(f"  Plex library: {len(plex_movies)} movies, {len(plex_shows)} shows, {len(plex_episodes)} episodes")
 
-        # Warn if non-VIP and near/at limit
-        if not limits.is_vip and current_collection_count >= limits.collection_limit:
-            limit = limits.collection_limit
-            self._log(f"  [yellow]WARNING: Collection at limit ({current_collection_count}/{limit})[/]")
+        if not limits.is_vip and current_count >= limits.collection_limit:
+            self._log(f"  [yellow]WARNING: Collection at limit ({current_count}/{limits.collection_limit})[/]")
             self._log("  [yellow]Upgrade to Trakt VIP for unlimited collection: https://trakt.tv/vip[/]")
             self._log("  [yellow]Skipping collection sync[/]")
             return True
 
-        # Build indices for Trakt movie collection
-        collected_movies_by_imdb: set[str] = set()
-        collected_movies_by_tmdb: set[int] = set()
-
-        for item in trakt_collection_movies:
-            ids = item.get("movie", {}).get("ids", {})
-            if ids.get("imdb"):
-                collected_movies_by_imdb.add(ids["imdb"])
-            if ids.get("tmdb"):
-                collected_movies_by_tmdb.add(ids["tmdb"])
-
-        del trakt_collection_movies
-        gc.collect()
-
-        # Build indices for Trakt show collection (episode-level)
-        # Track which shows exist and which episodes are collected
-        collected_shows_by_imdb: set[str] = set()
-        collected_shows_by_tvdb: set[int] = set()
-        collected_episodes: set[tuple] = set()  # (show_id, season, episode)
-
+        collected_movies = {key for item in trakt_collection_movies
+                            for key in _id_keys(item.get("movie", {}).get("ids", {}), MOVIE_ID_TYPES)}
+        collected_shows: set[tuple] = set()
+        collected_episodes: set[tuple] = set()
         for item in trakt_collection_shows:
-            show = item.get("show", {})
-            ids = show.get("ids", {})
-            imdb_id = ids.get("imdb")
-            tvdb_id = ids.get("tvdb")
-
-            if imdb_id:
-                collected_shows_by_imdb.add(imdb_id)
-            if tvdb_id:
-                collected_shows_by_tvdb.add(tvdb_id)
-
-            # Track collected episodes
+            keys = _id_keys(item.get("show", {}).get("ids", {}), SHOW_ID_TYPES)
+            collected_shows.update(keys)
             for season in item.get("seasons", []):
-                season_num = season.get("number", 0)
                 for ep in season.get("episodes", []):
-                    ep_num = ep.get("number", 0)
-                    if imdb_id:
-                        collected_episodes.add((imdb_id, season_num, ep_num))
-                    if tvdb_id:
-                        collected_episodes.add((tvdb_id, season_num, ep_num))
+                    collected_episodes.update((key, season.get("number", 0), ep.get("number", 0)) for key in keys)
 
-        del trakt_collection_shows
-        gc.collect()
-
-        # Build Plex show ID index
-        plex_show_ids_by_key: dict[str, PlexIds] = {}
-        for show in plex_shows:
-            plex_show_ids_by_key[str(show.ratingKey)] = extract_plex_ids(show)
-
-        # Find movies to add to collection (deduplicate by external ID)
-        movies_to_collect: list[dict] = []
-        processed_movie_ids: set[str] = set()
+        fixing = self._fix_collection_dates
+        best: dict[tuple, tuple[int, dict]] = {}
         total_movies = len(plex_movies)
         self._log(f"  Processing {total_movies} movies...")
-
-        # Update progress display every 1%, but yield to event loop more often for cancellation
-        movie_update_interval = max(1, total_movies // 100)
-        movie_yield_interval = max(1, min(500, total_movies // 200))
-
+        update_interval = max(1, total_movies // 100)
+        yield_interval = max(1, min(500, total_movies // 200))
         for i, plex_movie in enumerate(plex_movies):
-            # Yield to event loop frequently for responsive cancellation
-            if i % movie_yield_interval == 0:
+            if i % yield_interval == 0:
                 await asyncio.sleep(0)
                 if self._is_cancelled():
                     self._log("  [yellow]Cancelled[/]")
                     return False
-
-            # Update display less frequently (1%)
-            if i % movie_update_interval == 0:
+            if i % update_interval == 0:
                 self._progress(3, 4, 25 + (i / total_movies) * 20, f"Movies {i}/{total_movies}")
 
             plex_ids = extract_plex_ids(plex_movie)
+            keys = _id_keys(plex_ids, MOVIE_ID_TYPES)
+            if not keys or (not fixing and any(key in collected_movies for key in keys)):
+                continue
+            # the same movie in several libraries is collected once, from its best copy
+            score = media_score(plex_movie)
+            if keys[0] in best and best[keys[0]][0] >= score:
+                continue
+            movie = _trakt_item(plex_movie, plex_ids, MOVIE_ID_TYPES) or {}
+            movie.update(extract_media_metadata(plex_movie))
+            collected_at = _plex_dt_to_utc_iso(getattr(plex_movie, "addedAt", None))
+            if collected_at:
+                movie["collected_at"] = collected_at
+            best[keys[0]] = (score, movie)
+        movies_to_collect = [movie for _, movie in best.values()]
+        del plex_movies, best
 
-            # Skip duplicates (same movie in multiple libraries)
-            movie_key = plex_ids.imdb or (f"tmdb:{plex_ids.tmdb}" if plex_ids.tmdb else None)
-            if movie_key:
-                if movie_key in processed_movie_ids:
-                    continue
-                processed_movie_ids.add(movie_key)
-
-            # Check if already in collection (skip check when fixing dates)
-            in_collection = False
-            if not self._fix_collection_dates:
-                if plex_ids.imdb and plex_ids.imdb in collected_movies_by_imdb:
-                    in_collection = True
-                elif plex_ids.tmdb and plex_ids.tmdb in collected_movies_by_tmdb:
-                    in_collection = True
-
-            if not in_collection:
-                movie_data = self._build_trakt_movie(plex_movie, plex_ids)
-                if movie_data:
-                    # Add media metadata
-                    metadata = extract_media_metadata(plex_movie)
-                    movie_data.update(metadata)
-                    collected_at = _plex_dt_to_utc_iso(getattr(plex_movie, "addedAt", None))
-                    if collected_at:
-                        movie_data["collected_at"] = collected_at
-                    movies_to_collect.append(movie_data)
-
-        del plex_movies
-        gc.collect()
-
-        # Process episodes - group by show and find what's missing
-        # Structure: {show_key: {"ids", "title", "year", "new_show", "episodes": [(s,e,title)]}}
-        shows_to_update: dict[str, dict] = {}
-        processed_episode_ids: set[tuple] = set()
+        show_info = {str(show.ratingKey): (extract_plex_ids(show), show.title, show.year) for show in plex_shows}
+        rows: list[tuple[dict, int, dict, str]] = []
+        new_shows: set[tuple] = set()
+        existing_shows: set[tuple] = set()
+        seen: set[tuple] = set()
+        skipped_no_number = 0
         total_episodes = len(plex_episodes)
         self._log(f"  Processing {total_episodes} episodes...")
-
-        # Update progress display every 1%, but yield to event loop more often for cancellation
-        episode_update_interval = max(1, total_episodes // 100)
-        episode_yield_interval = max(1, min(500, total_episodes // 200))
-
+        update_interval = max(1, total_episodes // 100)
+        yield_interval = max(1, min(500, total_episodes // 200))
         for i, episode in enumerate(plex_episodes):
-            # Yield to event loop frequently for responsive cancellation
-            if i % episode_yield_interval == 0:
+            if i % yield_interval == 0:
                 await asyncio.sleep(0)
                 if self._is_cancelled():
                     self._log("  [yellow]Cancelled[/]")
                     return False
-
-            # Update display less frequently (1%)
-            if i % episode_update_interval == 0:
+            if i % update_interval == 0:
                 self._progress(3, 4, 45 + (i / total_episodes) * 30, f"Episodes {i}/{total_episodes}")
 
-            show_key = str(episode.grandparentRatingKey)
-            show_ids = plex_show_ids_by_key.get(show_key)
-            if not show_ids or (not show_ids.tvdb and not show_ids.imdb):
+            info = show_info.get(str(episode.grandparentRatingKey))
+            keys = _id_keys(info[0], SHOW_ID_TYPES) if info else []
+            if not info or not keys:
                 continue
-
-            season_num = episode.seasonNumber
-            ep_num = episode.episodeNumber
-
-            # Skip duplicates
-            ep_key = (show_ids.tvdb or show_ids.imdb, season_num, ep_num)
-            if ep_key in processed_episode_ids:
+            season, number = episode.parentIndex, episode.index
+            if season is None or number is None:
+                skipped_no_number += 1
                 continue
-            processed_episode_ids.add(ep_key)
-
-            # Check if episode already in collection (skip check when fixing dates)
-            in_collection = False
-            if not self._fix_collection_dates:
-                if show_ids.imdb and (show_ids.imdb, season_num, ep_num) in collected_episodes:
-                    in_collection = True
-                elif show_ids.tvdb and (show_ids.tvdb, season_num, ep_num) in collected_episodes:
-                    in_collection = True
-
-            if not in_collection:
-                # Determine if this is a new show or existing show with new episodes
-                show_in_collection = False
-                if show_ids.imdb and show_ids.imdb in collected_shows_by_imdb:
-                    show_in_collection = True
-                elif show_ids.tvdb and show_ids.tvdb in collected_shows_by_tvdb:
-                    show_in_collection = True
-
-                # Group episodes by show
-                show_data_key = show_ids.imdb or f"tvdb:{show_ids.tvdb}"
-                if show_data_key not in shows_to_update:
-                    shows_to_update[show_data_key] = {
-                        "ids": show_ids,
-                        "title": episode.grandparentTitle,
-                        "year": getattr(episode, "grandparentYear", None),
-                        "new_show": not show_in_collection,
-                        "episodes": [],
-                    }
-                added_at = getattr(episode, "addedAt", None)
-                shows_to_update[show_data_key]["episodes"].append(
-                    (season_num, ep_num, episode.title, added_at)
-                )
-
-        del plex_episodes, plex_shows, plex_show_ids_by_key
+            ep_key = (keys[0], season, number)
+            if ep_key in seen or (not fixing and any((k, season, number) in collected_episodes for k in keys)):
+                continue
+            seen.add(ep_key)
+            (existing_shows if any(k in collected_shows for k in keys) else new_shows).add(keys[0])
+            entry: dict[str, Any] = {"number": number}
+            collected_at = _plex_dt_to_utc_iso(getattr(episode, "addedAt", None))
+            if collected_at:
+                entry["collected_at"] = collected_at
+            _, title, year = info
+            rows.append(({"title": title, "year": year, "ids": dict(keys)}, season, entry, ""))
+        del plex_episodes, plex_shows, show_info
         gc.collect()
 
-        # Count new shows vs shows with new episodes
-        new_shows = [s for s in shows_to_update.values() if s["new_show"]]
-        existing_shows_with_new_eps = [s for s in shows_to_update.values() if not s["new_show"]]
-        total_new_episodes = sum(len(s["episodes"]) for s in shows_to_update.values())
-
-        verb = "to sync" if self._fix_collection_dates else "to add"
+        shows_to_collect = _group_by_show(rows)
+        if skipped_no_number:
+            self._log(f"  [yellow]Skipped {skipped_no_number} episodes without season or episode number[/]")
+        verb = "to sync" if fixing else "to add"
         self._log(f"  Collection - Movies {verb}: {len(movies_to_collect)}")
         self._log(f"  Collection - New shows {verb}: {len(new_shows)}")
-        self._log(f"  Collection - Existing shows with episodes {verb}: {len(existing_shows_with_new_eps)}")
-        self._log(f"  Collection - Total episodes {verb}: {total_new_episodes}")
+        self._log(f"  Collection - Existing shows with episodes {verb}: {len(existing_shows)}")
+        self._log(f"  Collection - Total episodes {verb}: {len(rows)}")
 
         if self._verbose:
             for m in movies_to_collect:
-                ca = m.get('collected_at', '')
-                date_str = f" [{ca[:10]}]" if ca else ""
-                self._log(f"    [dim]→ Collection: {m.get('title')} ({m.get('year')}){date_str}[/]")
-            for s in new_shows + existing_shows_with_new_eps:
-                episodes = s["episodes"]
-                # Show earliest episode date as representative
-                dates = [dt for *_, dt in episodes if dt is not None]
-                earliest = min(dates).strftime("%Y-%m-%d") if dates else ""
-                date_str = f" [{earliest}]" if earliest else ""
-                year_str = f" ({s['year']})" if s['year'] else ""
-                if s["new_show"] or len(episodes) > 20:
-                    self._log(f"    [dim]→ Collection: {s['title']}{year_str} ({len(episodes)} eps){date_str}[/]")
-                elif len(episodes) <= 5:
-                    ep_list = ", ".join(f"S{se:02d}E{ep:02d}" for se, ep, *_ in episodes)
-                    self._log(f"    [dim]→ Collection: {s['title']} - {ep_list}{date_str}[/]")
-                else:
-                    first_5 = ", ".join(f"S{se:02d}E{ep:02d}" for se, ep, *_ in episodes[:5])
-                    ep_list = f"{first_5} (+{len(episodes)-5} more)"
-                    self._log(f"    [dim]→ Collection: {s['title']} - {ep_list}{date_str}[/]")
+                date = f" [{m['collected_at'][:10]}]" if m.get("collected_at") else ""
+                self._log(f"    [dim]→ Collection: {_safe(m.get('title'))} ({m.get('year')}){_safe(date)}[/]")
+            for show in shows_to_collect:
+                codes = [f"S{s['number']:02d}E{e['number']:02d}" for s in show["seasons"] for e in s["episodes"]]
+                listed = ", ".join(codes[:5]) + (f" (+{len(codes) - 5} more)" if len(codes) > 5 else "")
+                self._log(f"    [dim]→ Collection: {_safe(show['title'])} - {listed}[/]")
 
-        # Build Trakt show objects with episode data
-        shows_to_collect: list[dict] = []
-        for show_data in shows_to_update.values():
-            ids = {}
-            if show_data["ids"].imdb:
-                ids["imdb"] = show_data["ids"].imdb
-            if show_data["ids"].tvdb:
-                ids["tvdb"] = show_data["ids"].tvdb
-            if not ids:
-                continue
-
-            # Group episodes by season
-            seasons_dict: dict[int, list[dict]] = {}
-            for season_num, ep_num, _, added_at in show_data["episodes"]:
-                if season_num not in seasons_dict:
-                    seasons_dict[season_num] = []
-                ep_data: dict = {"number": ep_num}
-                collected_at = _plex_dt_to_utc_iso(added_at)
-                if collected_at:
-                    ep_data["collected_at"] = collected_at
-                seasons_dict[season_num].append(ep_data)
-
-            seasons = [{"number": s, "episodes": eps} for s, eps in sorted(seasons_dict.items())]
-
-            shows_to_collect.append({
-                "title": show_data["title"],
-                "year": show_data["year"],
-                "ids": ids,
-                "seasons": seasons,
-            })
-
-        # Apply changes
         if not dry_run:
             self._progress(3, 4, 80, "Adding to Trakt collection")
             try:
-                if movies_to_collect:
-                    n_movies = len(movies_to_collect)
-                    batch_size = 500
-                    n_batches = (n_movies + batch_size - 1) // batch_size
-                    plural = "es" if n_batches > 1 else ""
-                    self._log(f"  Sending {n_movies} movies to Trakt collection ({n_batches} batch{plural})...")
-                    for i in range(0, n_movies, batch_size):
-                        batch = movies_to_collect[i:i + batch_size]
-                        if n_batches > 1:
-                            self._log(f"    Batch {i // batch_size + 1}/{n_batches} ({len(batch)} movies)...")
-                        response = await self.trakt.add_to_collection(movies=batch)
-                        result.collection_added += response.get("added", {}).get("movies", 0)
-                        result.collection_updated += response.get("updated", {}).get("movies", 0)
-
-                if shows_to_collect:
-                    n_shows = len(shows_to_collect)
-                    batch_size = 100
-                    n_batches = (n_shows + batch_size - 1) // batch_size
-                    plural = "es" if n_batches > 1 else ""
-                    self._log(
-                        f"  Sending {n_shows} shows ({total_new_episodes} episodes) "
-                        f"to Trakt collection ({n_batches} batch{plural})..."
-                    )
-                    for i in range(0, n_shows, batch_size):
-                        batch = shows_to_collect[i:i + batch_size]
-                        if n_batches > 1:
-                            self._log(f"    Batch {i // batch_size + 1}/{n_batches} ({len(batch)} shows)...")
-                        response = await self.trakt.add_to_collection(shows=batch)
-                        result.collection_added += response.get("added", {}).get("episodes", 0)
-                        result.collection_updated += response.get("updated", {}).get("episodes", 0)
+                response = await self._push(
+                    f"Sending {len(movies_to_collect)} movies to Trakt collection",
+                    self.trakt.add_to_collection, movies=movies_to_collect,
+                )
+                result.collection_added += response.get("added", {}).get("movies", 0)
+                result.collection_updated += response.get("updated", {}).get("movies", 0)
+                response = await self._push(
+                    f"Sending {len(shows_to_collect)} shows ({len(rows)} episodes) to Trakt collection",
+                    self.trakt.add_to_collection, shows=shows_to_collect,
+                )
+                result.collection_added += response.get("added", {}).get("episodes", 0)
+                result.collection_updated += response.get("updated", {}).get("episodes", 0)
             except TraktAccountLimitError as e:
-                self._log(f"  [red]ERROR: {e}[/]")
+                self._log(f"  [red]ERROR: {_safe(e)}[/]")
                 if not e.is_vip:
-                    self._log(f"  [yellow]Upgrade to Trakt VIP for unlimited collection: {e.upgrade_url}[/]")
+                    self._log(f"  [yellow]Upgrade to Trakt VIP for unlimited collection: {_safe(e.upgrade_url)}[/]")
                 result.errors.append(f"Collection limit exceeded: {e}")
 
         self._progress(3, 4, 100, "Collection complete")
         self._log(f"  [dim]Phase 3 completed in {time.time() - phase_start:.1f}s[/]")
-
-        del movies_to_collect, shows_to_collect, shows_to_update
-        del collected_movies_by_imdb, collected_movies_by_tmdb
-        del collected_shows_by_imdb, collected_shows_by_tvdb, collected_episodes
-        gc.collect()
-
         return True
-
-    def _build_trakt_show(self, plex_show: Any, plex_ids: Any) -> dict | None:
-        """Build Trakt show object from Plex data."""
-        ids = {}
-        if plex_ids.imdb:
-            ids["imdb"] = plex_ids.imdb
-        if plex_ids.tvdb:
-            ids["tvdb"] = plex_ids.tvdb
-
-        if not ids:
-            return None
-
-        return {
-            "title": plex_show.title,
-            "year": plex_show.year,
-            "ids": ids,
-        }
 
     async def _sync_watchlist(self, result: SyncResult, dry_run: bool) -> bool:
         """Sync watchlists between Plex and Trakt. Returns False if cancelled."""
-        if not (self._get_sync_option("watchlist_plex_to_trakt") or self._get_sync_option("watchlist_trakt_to_plex")):
+        options = self._options()
+        if not (options["watchlist_plex_to_trakt"] or options["watchlist_trakt_to_plex"]):
             self._log("\n[dim]Phase 4: Skipped (watchlist sync disabled)[/]")
+            return True
+        if self.plex.account_token in self._pushed.watchlist_accounts:
+            self._log("\n[dim]Phase 4: Skipped (watchlist already synced for this Plex account)[/]")
             return True
 
         phase_start = time.time()
         self._log("\n[cyan]Phase 4:[/] Syncing watchlist...")
         self._progress(4, 4, 0, "Fetching watchlist data")
 
-        # Check account limits
-        limits = await self._get_account_limits()
-        if not limits.is_vip and self._get_sync_option("watchlist_plex_to_trakt"):
+        limits = await self._cache.get(self.trakt.get_account_limits)
+        if not limits.is_vip and options["watchlist_plex_to_trakt"]:
             self._log(f"  [yellow]Note: Free Trakt account (limit: {limits.watchlist_limit} items)[/]")
 
-        # Fetch watchlists (use cache if available for Trakt)
-        with Progress(
-            SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-            transient=True, console=console
-        ) as progress:
-            task = progress.add_task("Fetching Plex watchlist...", total=None)
-            self._progress(4, 4, 5, "Plex watchlist")
-            plex_watchlist = await asyncio.to_thread(self.plex.get_watchlist)
-            progress.update(task, description=f"Got {len(plex_watchlist)} Plex watchlist items")
+        self._progress(4, 4, 15, "Trakt watchlist")
+        trakt_movies = await self._cache.get(self.trakt.get_watchlist_movies)
+        trakt_shows = await self._cache.get(self.trakt.get_watchlist_shows)
+        trakt_count = len(trakt_movies) + len(trakt_shows)
 
-            if self._trakt_cache:
-                trakt_watchlist_movies = self._trakt_cache.watchlist_movies
-                trakt_watchlist_shows = self._trakt_cache.watchlist_shows
-                self._progress(4, 4, 15, "Using cached Trakt data")
-            else:
-                task = progress.add_task("Fetching Trakt watchlist...", total=None)
-                self._progress(4, 4, 15, "Trakt watchlist")
-                trakt_watchlist_movies = await self.trakt.get_watchlist_movies()
-                trakt_watchlist_shows = await self.trakt.get_watchlist_shows()
-            n_movies, n_shows = len(trakt_watchlist_movies), len(trakt_watchlist_shows)
-            progress.update(task, description=f"Got {n_movies} movies, {n_shows} shows")
-
-        trakt_watchlist_count = len(trakt_watchlist_movies) + len(trakt_watchlist_shows)
-        self._log(f"  Plex watchlist: {len(plex_watchlist)} items")
-        self._log(f"  Trakt watchlist: {len(trakt_watchlist_movies)} movies, {len(trakt_watchlist_shows)} shows")
-
-        # Check if Trakt watchlist is at limit for Plex -> Trakt sync
-        skip_plex_to_trakt = False
-        if not limits.is_vip and trakt_watchlist_count >= limits.watchlist_limit:
-            limit = limits.watchlist_limit
-            self._log(f"  [yellow]WARNING: Trakt watchlist at limit ({trakt_watchlist_count}/{limit})[/]")
+        if not limits.is_vip and trakt_count >= limits.watchlist_limit and options["watchlist_plex_to_trakt"]:
+            self._log(f"  [yellow]WARNING: Trakt watchlist at limit ({trakt_count}/{limits.watchlist_limit})[/]")
             self._log("  [yellow]Upgrade to Trakt VIP for unlimited watchlist: https://trakt.tv/vip[/]")
-            if self._get_sync_option("watchlist_plex_to_trakt"):
-                self._log("  [yellow]Skipping Plex → Trakt watchlist sync[/]")
-                skip_plex_to_trakt = True
+            self._log("  [yellow]Skipping Plex → Trakt watchlist sync[/]")
+            options["watchlist_plex_to_trakt"] = False
 
-        # Build indices for Trakt watchlist
-        trakt_watchlist_by_imdb: set[str] = set()
-        trakt_watchlist_by_tmdb: set[int] = set()
-        trakt_watchlist_by_tvdb: set[int] = set()
+        self._progress(4, 4, 30, "Comparing watchlists")
+        plan = await asyncio.to_thread(
+            _plan_watchlist, self.plex, trakt_movies, trakt_shows, self._pushed.watched_movies,
+            options, self._is_cancelled, self._log,
+        )
+        if plan is None:
+            self._log("  [yellow]Cancelled[/]")
+            return False
+        movies_to_trakt, shows_to_trakt, items_to_plex, plex_count = plan
+        self._pushed.watchlist_accounts.add(self.plex.account_token)
 
-        for item in trakt_watchlist_movies:
-            ids = item.get("movie", {}).get("ids", {})
-            if ids.get("imdb"):
-                trakt_watchlist_by_imdb.add(ids["imdb"])
-            if ids.get("tmdb"):
-                trakt_watchlist_by_tmdb.add(ids["tmdb"])
-
-        for item in trakt_watchlist_shows:
-            ids = item.get("show", {}).get("ids", {})
-            if ids.get("imdb"):
-                trakt_watchlist_by_imdb.add(ids["imdb"])
-            if ids.get("tvdb"):
-                trakt_watchlist_by_tvdb.add(ids["tvdb"])
-
-        # Build index for Plex watchlist
-        plex_watchlist_by_imdb: set[str] = set()
-        plex_watchlist_by_tmdb: set[int] = set()
-        plex_watchlist_by_tvdb: set[int] = set()
-
-        for item in plex_watchlist:
-            plex_ids = extract_plex_ids(item)
-            if plex_ids.imdb:
-                plex_watchlist_by_imdb.add(plex_ids.imdb)
-            if plex_ids.tmdb:
-                plex_watchlist_by_tmdb.add(plex_ids.tmdb)
-            if plex_ids.tvdb:
-                plex_watchlist_by_tvdb.add(plex_ids.tvdb)
-
-        # Plex -> Trakt: Find items in Plex watchlist but not Trakt
-        movies_to_add_trakt: list[dict] = []
-        shows_to_add_trakt: list[dict] = []
-
-        if self._get_sync_option("watchlist_plex_to_trakt") and not skip_plex_to_trakt:
-            self._progress(4, 4, 30, "Comparing Plex → Trakt")
-            for item in plex_watchlist:
-                if self._is_cancelled():
-                    self._log("  [yellow]Cancelled[/]")
-                    return False
-
-                plex_ids = extract_plex_ids(item)
-
-                # Check if already on Trakt watchlist
-                on_trakt = False
-                if plex_ids.imdb and plex_ids.imdb in trakt_watchlist_by_imdb:
-                    on_trakt = True
-                elif plex_ids.tmdb and plex_ids.tmdb in trakt_watchlist_by_tmdb:
-                    on_trakt = True
-                elif plex_ids.tvdb and plex_ids.tvdb in trakt_watchlist_by_tvdb:
-                    on_trakt = True
-
-                if not on_trakt:
-                    # Determine if movie or show
-                    item_type = getattr(item, "TYPE", None) or getattr(item, "type", None)
-                    if item_type == "movie":
-                        movie_data = self._build_trakt_movie(item, plex_ids)
-                        if movie_data:
-                            movies_to_add_trakt.append(movie_data)
-                    elif item_type == "show":
-                        show_data = self._build_trakt_show(item, plex_ids)
-                        if show_data:
-                            shows_to_add_trakt.append(show_data)
-
-        # Trakt -> Plex: Find items in Trakt watchlist but not Plex
-        items_to_add_plex: list[Any] = []
-
-        if self._get_sync_option("watchlist_trakt_to_plex"):
-            self._progress(4, 4, 50, "Comparing Trakt → Plex")
-
-            # Process Trakt movies
-            for item in trakt_watchlist_movies:
-                if self._is_cancelled():
-                    self._log("  [yellow]Cancelled[/]")
-                    return False
-
-                ids = item.get("movie", {}).get("ids", {})
-                title = item.get("movie", {}).get("title", "")
-
-                # Check if already on Plex watchlist
-                on_plex = False
-                if ids.get("imdb") and ids["imdb"] in plex_watchlist_by_imdb:
-                    on_plex = True
-                elif ids.get("tmdb") and ids["tmdb"] in plex_watchlist_by_tmdb:
-                    on_plex = True
-
-                if not on_plex and title:
-                    # Search Plex Discover for this movie
-                    try:
-                        results = await asyncio.to_thread(self.plex.search_discover, title, libtype="movie")
-                        for match in results[:5]:
-                            match_ids = extract_plex_ids(match)
-                            if (ids.get("imdb") and match_ids.imdb == ids["imdb"]) or \
-                               (ids.get("tmdb") and match_ids.tmdb == ids["tmdb"]):
-                                items_to_add_plex.append(match)
-                                break
-                    except Exception as e:
-                        self._log(f"  [yellow]Warning: Could not search for '{title}': {e}[/]")
-
-            # Process Trakt shows
-            for item in trakt_watchlist_shows:
-                if self._is_cancelled():
-                    self._log("  [yellow]Cancelled[/]")
-                    return False
-
-                ids = item.get("show", {}).get("ids", {})
-                title = item.get("show", {}).get("title", "")
-
-                # Check if already on Plex watchlist
-                on_plex = False
-                if ids.get("imdb") and ids["imdb"] in plex_watchlist_by_imdb:
-                    on_plex = True
-                elif ids.get("tvdb") and ids["tvdb"] in plex_watchlist_by_tvdb:
-                    on_plex = True
-
-                if not on_plex and title:
-                    # Search Plex Discover for this show
-                    try:
-                        results = await asyncio.to_thread(self.plex.search_discover, title, libtype="show")
-                        for match in results[:5]:
-                            match_ids = extract_plex_ids(match)
-                            if (ids.get("imdb") and match_ids.imdb == ids["imdb"]) or \
-                               (ids.get("tvdb") and match_ids.tvdb == ids["tvdb"]):
-                                items_to_add_plex.append(match)
-                                break
-                    except Exception as e:
-                        self._log(f"  [yellow]Warning: Could not search for '{title}': {e}[/]")
-
-        self._log(f"  Watchlist - To add to Trakt: {len(movies_to_add_trakt)} movies, {len(shows_to_add_trakt)} shows")
-        self._log(f"  Watchlist - To add to Plex: {len(items_to_add_plex)} items")
+        self._log(f"  Plex watchlist: {plex_count} items")
+        self._log(f"  Trakt watchlist: {len(trakt_movies)} movies, {len(trakt_shows)} shows")
+        self._log(f"  Watchlist - To add to Trakt: {len(movies_to_trakt)} movies, {len(shows_to_trakt)} shows")
+        self._log(f"  Watchlist - To add to Plex: {len(items_to_plex)} items")
 
         if self._verbose:
-            for m in movies_to_add_trakt:
-                self._log(f"    [dim]→ Trakt watchlist: {m.get('title')} ({m.get('year')})[/]")
-            for s in shows_to_add_trakt:
-                self._log(f"    [dim]→ Trakt watchlist: {s.get('title')} ({s.get('year')})[/]")
-            for item in items_to_add_plex:
-                self._log(f"    [dim]→ Plex watchlist: {getattr(item, 'title', '?')} ({getattr(item, 'year', '?')})[/]")
+            for item in movies_to_trakt + shows_to_trakt:
+                self._log(f"    [dim]→ Trakt watchlist: {_safe(item.get('title'))} ({item.get('year')})[/]")
+            for item in items_to_plex:
+                title, year = getattr(item, "title", "?"), getattr(item, "year", "?")
+                self._log(f"    [dim]→ Plex watchlist: {_safe(title)} ({year})[/]")
 
-        # Apply changes
         if not dry_run:
             self._progress(4, 4, 80, "Applying watchlist changes")
-
-            if movies_to_add_trakt or shows_to_add_trakt:
-                self._log("  Adding to Trakt watchlist...")
-                try:
-                    if movies_to_add_trakt:
-                        response = await self.trakt.add_to_watchlist(movies=movies_to_add_trakt)
-                        result.watchlist_added_trakt += response.get("added", {}).get("movies", 0)
-                    if shows_to_add_trakt:
-                        response = await self.trakt.add_to_watchlist(shows=shows_to_add_trakt)
-                        result.watchlist_added_trakt += response.get("added", {}).get("shows", 0)
-                except TraktAccountLimitError as e:
-                    self._log(f"  [red]ERROR: {e}[/]")
-                    if not e.is_vip:
-                        self._log(f"  [yellow]Upgrade to Trakt VIP for unlimited watchlist: {e.upgrade_url}[/]")
-                    result.errors.append(f"Watchlist limit exceeded: {e}")
-
-            for item in items_to_add_plex:
-                try:
-                    await asyncio.to_thread(self.plex.add_to_watchlist, item)
-                    result.watchlist_added_plex += 1
-                except Exception as e:
-                    self._log(f"  [yellow]Warning: Could not add to Plex watchlist: {e}[/]")
+            try:
+                response = await self._push(
+                    f"Adding {len(movies_to_trakt)} movies and {len(shows_to_trakt)} shows to Trakt watchlist",
+                    self.trakt.add_to_watchlist, movies=movies_to_trakt, shows=shows_to_trakt,
+                )
+                added = response.get("added", {})
+                result.watchlist_added_trakt += added.get("movies", 0) + added.get("shows", 0)
+            except TraktAccountLimitError as e:
+                self._log(f"  [red]ERROR: {_safe(e)}[/]")
+                if not e.is_vip:
+                    self._log(f"  [yellow]Upgrade to Trakt VIP for unlimited watchlist: {_safe(e.upgrade_url)}[/]")
+                result.errors.append(f"Watchlist limit exceeded: {e}")
+            result.watchlist_added_plex += await self._write_plex(
+                f"Adding {len(items_to_plex)} items to Plex watchlist",
+                self.plex.add_to_watchlist_batch, items_to_plex, result,
+            )
 
         self._progress(4, 4, 100, "Watchlist complete")
         self._log(f"  [dim]Phase 4 completed in {time.time() - phase_start:.1f}s[/]")
-
-        # Cleanup
-        del plex_watchlist, trakt_watchlist_movies, trakt_watchlist_shows
-        del trakt_watchlist_by_imdb, trakt_watchlist_by_tmdb, trakt_watchlist_by_tvdb
-        del plex_watchlist_by_imdb, plex_watchlist_by_tmdb, plex_watchlist_by_tvdb
-        gc.collect()
-
         return True
+
+    async def _run_phase(self, phase: Awaitable[bool], result: SyncResult) -> bool:
+        """Run one phase, recording an error and carrying on to the next; False only on cancel."""
+        try:
+            return await phase
+        except (TraktAuthError, PlexAuthError):
+            raise
+        except Exception as e:
+            get_file_logger().exception("Sync phase failed")
+            self._log(f"  [red]Phase failed: {_safe(type(e).__name__)}: {_safe(e)}[/]")
+            result.errors.append(f"{type(e).__name__}: {e}")
+            return True
 
     async def sync(
         self,
@@ -1450,7 +996,7 @@ class SyncEngine:
         no_movies: bool = False,
         no_shows: bool = False,
     ) -> SyncResult | None:
-        """Run full sync."""
+        """Sync this server through every enabled phase; None if cancelled."""
         self._fix_collection_dates = fix_collection_dates
         start_time = time.time()
         result = SyncResult()
@@ -1471,55 +1017,37 @@ class SyncEngine:
         if no_shows:
             self._log("  [cyan]Skipping shows/episodes[/]")
 
-        if not collection_only:
-            if not no_movies:
-                if not await self._sync_movies(result, dry_run):
-                    return None
-            else:
-                self._log("\n[dim]Phase 1: Skipped (--no-movies)[/]")
-
-            if not no_shows:
-                if not await self._sync_episodes(result, dry_run):
-                    return None
-            else:
-                self._log("\n[dim]Phase 2: Skipped (--no-shows)[/]")
-        else:
+        if collection_only:
             self._log("\n[dim]Phase 1: Skipped (--collection-only)[/]")
             self._log("\n[dim]Phase 2: Skipped (--collection-only)[/]")
+        else:
+            if no_movies:
+                self._log("\n[dim]Phase 1: Skipped (--no-movies)[/]")
+            elif not await self._run_phase(self._sync_movies(result, dry_run), result):
+                return None
+            if no_shows:
+                self._log("\n[dim]Phase 2: Skipped (--no-shows)[/]")
+            elif not await self._run_phase(self._sync_episodes(result, dry_run), result):
+                return None
 
-        if not await self._sync_collection(result, dry_run, no_movies=no_movies, no_shows=no_shows):
+        collection = self._sync_collection(result, dry_run, no_movies=no_movies, no_shows=no_shows)
+        if not await self._run_phase(collection, result):
             return None
 
-        if not collection_only:
-            if not await self._sync_watchlist(result, dry_run):
-                return None
-        else:
+        if collection_only:
             self._log("\n[dim]Phase 4: Skipped (--collection-only)[/]")
+        elif not await self._run_phase(self._sync_watchlist(result, dry_run), result):
+            return None
 
         if dry_run:
             self._log("\n[yellow]Dry run complete - no changes applied[/]")
+        elif result.errors:
+            self._log(f"\n[yellow]Sync finished with {len(result.errors)} error(s)[/]")
         else:
             self._log("\n[green]Sync complete![/]")
 
         result.duration_seconds = time.time() - start_time
         return result
-
-    def _build_trakt_movie(self, plex_movie: Any, plex_ids: Any) -> dict | None:
-        """Build Trakt movie object from Plex data."""
-        ids = {}
-        if plex_ids.imdb:
-            ids["imdb"] = plex_ids.imdb
-        if plex_ids.tmdb:
-            ids["tmdb"] = plex_ids.tmdb
-
-        if not ids:
-            return None
-
-        return {
-            "title": plex_movie.title,
-            "year": plex_movie.year,
-            "ids": ids,
-        }
 
 
 async def run_multi_server_sync(
@@ -1535,13 +1063,11 @@ async def run_multi_server_sync(
     log_callback: Callable[[str], None] | None = None,
     cancel_check: Callable[[], bool] | None = None,
 ) -> SyncResult:
-    """Run sync across multiple Plex servers."""
-    def log(msg: str):
-        """Forward a line to the caller's log sink, if it supplied one."""
-        if log_callback:
-            log_callback(msg)
+    """Run sync across multiple Plex servers, refusing to start while another process is syncing."""
+    def log(msg: str) -> None:
+        """Log a markup line to the console, sync.log and the caller's sink."""
+        _emit(msg, log_callback)
 
-    # Determine which servers to sync
     if server_names:
         servers_to_sync = []
         for name in server_names:
@@ -1549,110 +1075,69 @@ async def run_multi_server_sync(
             if server:
                 servers_to_sync.append(server)
             else:
-                log(f"WARNING:Server '{name}' not found in configuration")
+                log(f"WARNING:Server '{_safe(name)}' not found in configuration")
     else:
         servers_to_sync = config.get_enabled_servers()
 
+    total_result = SyncResult()
     if not servers_to_sync:
         log("ERROR:No servers configured or enabled for sync")
-        return SyncResult()
+        total_result.errors.append("No servers configured or enabled for sync")
+        return total_result
 
-    # Aggregate results across all servers
-    total_result = SyncResult()
-    start_time = time.time()
-    server_count = len(servers_to_sync)
-    pushed = PushedToTrakt()
+    with _sync_lock() as acquired:
+        if not acquired:
+            log("ERROR:Another Pakt sync is already running")
+            total_result.errors.append("Another sync is already running")
+            return total_result
 
-    log(f"[bold]Starting sync across {server_count} server(s)...[/]")
+        start_time = time.time()
+        server_count = len(servers_to_sync)
+        pushed = PushedToTrakt()
+        cache = TraktCache()
+        synced = 0
+        log(f"[bold]Starting sync across {server_count} server(s)...[/]")
 
-    async with TraktClient(config.trakt, on_token_refresh=on_token_refresh) as trakt:
-        # Pre-fetch all Trakt data once for multi-server efficiency
-        trakt_cache: TraktCache | None = None
-        if server_count > 1:
-            log("[bold]Pre-fetching Trakt data for all servers...[/]")
-            with Progress(
-                SpinnerColumn(), TextColumn("[progress.description]{task.description}"),
-                transient=True, console=console
-            ) as progress:
-                task = progress.add_task("Fetching account limits...", total=None)
-                account_limits = await trakt.get_account_limits()
-
-                task = progress.add_task("Fetching watched movies...", total=None)
-                watched_movies = await trakt.get_watched_movies()
-                progress.update(task, description=f"Got {len(watched_movies)} watched movies")
-
-                task = progress.add_task("Fetching movie ratings...", total=None)
-                movie_ratings = await trakt.get_movie_ratings()
-                progress.update(task, description=f"Got {len(movie_ratings)} movie ratings")
-
-                task = progress.add_task("Fetching watched shows...", total=None)
-                watched_shows = await trakt.get_watched_shows()
-                progress.update(task, description=f"Got {len(watched_shows)} watched shows")
-
-                task = progress.add_task("Fetching episode ratings...", total=None)
-                episode_ratings = await trakt.get_episode_ratings()
-                progress.update(task, description=f"Got {len(episode_ratings)} episode ratings")
-
-                task = progress.add_task("Fetching collection...", total=None)
-                collection_movies = await trakt.get_collection_movies()
-                collection_shows = await trakt.get_collection_shows()
-                progress.update(task, description=f"Got {len(collection_movies)} movies, {len(collection_shows)} shows")
-
-                task = progress.add_task("Fetching watchlist...", total=None)
-                watchlist_movies = await trakt.get_watchlist_movies()
-                watchlist_shows = await trakt.get_watchlist_shows()
-                progress.update(task, description=f"Got {len(watchlist_movies)} movies, {len(watchlist_shows)} shows")
-
-            trakt_cache = TraktCache(
-                account_limits=account_limits,
-                watched_movies=watched_movies,
-                movie_ratings=movie_ratings,
-                watched_shows=watched_shows,
-                episode_ratings=episode_ratings,
-                collection_movies=collection_movies,
-                collection_shows=collection_shows,
-                watchlist_movies=watchlist_movies,
-                watchlist_shows=watchlist_shows,
-            )
-            log(f"  Cached: {len(watched_movies)} movies, {len(watched_shows)} shows, "
-                f"{len(collection_movies)} collection")
-
-        for idx, server_config in enumerate(servers_to_sync, 1):
-            if cancel_check and cancel_check():
-                log("WARNING:Sync cancelled")
-                break
-
-            log(f"\n[bold cyan]═══ Server {idx}/{server_count}: {server_config.name} ═══[/]")
-
-            try:
-                # Create PlexClient from server config
-                plex = PlexClient(server_config)
-                await asyncio.to_thread(plex.connect)
-                log(f"Connected to: {plex.server.friendlyName}")
-
-                # Create SyncEngine with server context and shared cache
-                engine = SyncEngine(
-                    config, trakt, plex,
-                    log_callback=log_callback,
-                    cancel_check=cancel_check,
-                    verbose=verbose,
-                    server_name=server_config.name,
-                    server_config=server_config,
-                    trakt_cache=trakt_cache,
-                    pushed=pushed,
-                )
-
-                # Run sync for this server
-                result = await engine.sync(
-                    dry_run=dry_run,
-                    fix_collection_dates=fix_collection_dates,
-                    collection_only=collection_only,
-                    no_movies=no_movies,
-                    no_shows=no_shows,
-                )
+        async with TraktClient(config.trakt, on_token_refresh=on_token_refresh) as trakt:
+            for idx, server_config in enumerate(servers_to_sync, 1):
+                if cancel_check and cancel_check():
+                    log("WARNING:Sync cancelled")
+                    break
+                log(f"\n[bold cyan]═══ Server {idx}/{server_count}: {_safe(server_config.name)} ═══[/]")
+                try:
+                    plex = PlexClient(server_config, account_token=config.plex_token)
+                    await asyncio.to_thread(plex.connect)
+                    log(f"Connected to: {_safe(plex.server.friendlyName)}")
+                    engine = SyncEngine(
+                        config, trakt, plex,
+                        log_callback=log_callback,
+                        cancel_check=cancel_check,
+                        verbose=verbose,
+                        server_name=server_config.name,
+                        server_config=server_config,
+                        trakt_cache=cache,
+                        pushed=pushed,
+                    )
+                    result = await engine.sync(
+                        dry_run=dry_run,
+                        fix_collection_dates=fix_collection_dates,
+                        collection_only=collection_only,
+                        no_movies=no_movies,
+                        no_shows=no_shows,
+                    )
+                except TraktAuthError as e:
+                    log(f"ERROR:{_safe(e)}")
+                    total_result.errors.append(str(e))
+                    break
+                except Exception as e:
+                    get_file_logger().exception("Server %s failed", server_config.name)
+                    error_msg = f"[{server_config.name}] Error: {type(e).__name__}: {e}"
+                    log(f"ERROR:{_safe(error_msg)}")
+                    total_result.errors.append(error_msg)
+                    continue
 
                 if result:
-                    # Aggregate results
+                    synced += 1
                     total_result.added_to_trakt += result.added_to_trakt
                     total_result.added_to_plex += result.added_to_plex
                     total_result.ratings_synced += result.ratings_synced
@@ -1662,17 +1147,13 @@ async def run_multi_server_sync(
                     total_result.watchlist_added_plex += result.watchlist_added_plex
                     total_result.errors.extend(result.errors)
 
-            except Exception as e:
-                error_msg = f"[{server_config.name}] Error: {type(e).__name__}: {e}"
-                log(f"ERROR:{error_msg}")
-                total_result.errors.append(error_msg)
-                # Continue with next server instead of failing entirely
-
-    total_result.duration_seconds = time.time() - start_time
+        total_result.duration_seconds = time.time() - start_time
+        if synced and not dry_run:
+            set_last_sync(datetime.now(timezone.utc))
 
     if server_count > 1:
         log("\n[bold green]═══ Multi-Server Sync Complete ═══[/]")
-        log(f"  Servers synced: {server_count}")
+        log(f"  Servers synced: {synced}/{server_count}")
         log(f"  Total added to Trakt: {total_result.added_to_trakt}")
         log(f"  Total added to Plex: {total_result.added_to_plex}")
         log(f"  Total ratings synced: {total_result.ratings_synced}")

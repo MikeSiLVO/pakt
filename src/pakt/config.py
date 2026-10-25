@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import datetime
 from pathlib import Path
 from typing import Literal
 
@@ -14,32 +15,38 @@ logger = logging.getLogger(__name__)
 
 
 def get_config_dir() -> Path:
-    """Get the configuration directory (platform-appropriate)."""
+    """Get the configuration directory (platform-appropriate), private to the user."""
     if os.name == "nt":  # Windows
         base = Path(os.environ.get("APPDATA", Path.home()))
         config_dir = base / "pakt"
     else:  # Linux/macOS
         config_dir = Path.home() / ".config" / "pakt"
     config_dir.mkdir(parents=True, exist_ok=True)
+    if os.name != "nt":
+        try:
+            config_dir.chmod(0o700)
+        except OSError:
+            pass  # some mounts don't support it
     return config_dir
 
 
-def get_cache_dir() -> Path:
-    """Get the cache directory (platform-appropriate)."""
-    if os.name == "nt":  # Windows
-        base = Path(os.environ.get("LOCALAPPDATA", Path.home()))
-        cache_dir = base / "pakt" / "cache"
-    else:  # Linux/macOS
-        cache_dir = Path.home() / ".cache" / "pakt"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return cache_dir
+def get_last_sync() -> datetime | None:
+    """Get when the last live sync finished, or None when none has been recorded."""
+    try:
+        return datetime.fromisoformat((get_config_dir() / "last_sync").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return None
+
+
+def set_last_sync(when: datetime) -> None:
+    """Set when a live sync last finished, for the scheduler to count its next run from."""
+    (get_config_dir() / "last_sync").write_text(when.isoformat(), encoding="utf-8")
 
 
 class TraktConfig(BaseModel):
     """Trakt API configuration."""
 
     client_id: str = "bc25ba5024e871104e3a090b98e44895670d66d89d5296fa6ed027d6e2a44f9d"
-    client_secret: str = "0a3cb10a368e848ef67ebcbdb0f64b437ee5abf17e07e4f216c9aa7346f587f5"
     access_token: str = ""
     refresh_token: str = ""
     expires_at: int = 0
@@ -70,6 +77,7 @@ class WebConfig(BaseModel):
 
     host: str = "127.0.0.1"
     port: int = 7258
+    allowed_hosts: list[str] = Field(default_factory=list)
 
 
 class ServerSyncOverrides(BaseModel):
@@ -112,6 +120,7 @@ class Config(BaseModel):
     sync: SyncConfig = Field(default_factory=SyncConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
     plex_token: str = ""
+    plex_client_id: str = ""
     servers: list[ServerConfig] = Field(default_factory=list)
     trakt: TraktConfig = Field(default_factory=TraktConfig)
 
@@ -166,7 +175,9 @@ class Config(BaseModel):
         temp_file = config_file.with_suffix(".json.tmp")
 
         # A half-written config.json is unrecoverable, so build it alongside and swap.
-        temp_file.write_text(self.model_dump_json(indent=2), encoding="utf-8")
+        fd = os.open(temp_file, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(self.model_dump_json(indent=2))
         try:
             os.chmod(temp_file, 0o600)
         except OSError:
@@ -174,11 +185,7 @@ class Config(BaseModel):
         os.replace(temp_file, config_file)
 
     def save_trakt_token(self, token: dict, config_dir: Path | None = None) -> None:
-        """Write refreshed Trakt tokens without flushing the rest of this (possibly stale) object.
-
-        Sync holds a Config for its whole run, so saving it wholesale would revert
-        any setting changed in the meantime.
-        """
+        """Save Trakt tokens into a fresh read of config.json, and onto this copy."""
         self.trakt.access_token = token["access_token"]
         self.trakt.refresh_token = token["refresh_token"]
         self.trakt.expires_at = token["created_at"] + token["expires_in"]
@@ -191,7 +198,7 @@ class Config(BaseModel):
 
 
 def _migrate_legacy_config(config_dir: Path) -> Config | None:
-    """Migrate from legacy .env to config.json."""
+    """Migrate legacy .env settings into a Config, renaming the file to .env.bak."""
     env_file = config_dir / ".env"
 
     if not env_file.exists():
@@ -207,16 +214,13 @@ def _migrate_legacy_config(config_dir: Path) -> Config | None:
             key, value = line.split("=", 1)
             env_vars[key] = value
 
-    # Trakt config
     config.trakt.client_id = env_vars.get("TRAKT_CLIENT_ID", config.trakt.client_id)
-    config.trakt.client_secret = env_vars.get("TRAKT_CLIENT_SECRET", config.trakt.client_secret)
     config.trakt.access_token = env_vars.get("TRAKT_ACCESS_TOKEN", "")
     config.trakt.refresh_token = env_vars.get("TRAKT_REFRESH_TOKEN", "")
     config.trakt.expires_at = int(env_vars.get("TRAKT_EXPIRES_AT", "0") or "0")
 
-    # Sync config
     def parse_bool(val: str) -> bool:
-        """Read the loose truthy spellings the old .env allowed."""
+        """Parse the loose truthy spellings the old .env allowed."""
         return val.lower() in ("true", "1", "yes")
 
     config.sync.watched_plex_to_trakt = parse_bool(env_vars.get("PAKT_SYNC_WATCHED_PLEX_TO_TRAKT", "true"))
@@ -227,11 +231,9 @@ def _migrate_legacy_config(config_dir: Path) -> Config | None:
     config.sync.watchlist_plex_to_trakt = parse_bool(env_vars.get("PAKT_SYNC_WATCHLIST_PLEX_TO_TRAKT", "false"))
     config.sync.watchlist_trakt_to_plex = parse_bool(env_vars.get("PAKT_SYNC_WATCHLIST_TRAKT_TO_PLEX", "false"))
 
-    # Scheduler config
     config.scheduler.enabled = parse_bool(env_vars.get("PAKT_SCHEDULER_ENABLED", "false"))
     config.scheduler.interval_hours = int(env_vars.get("PAKT_SCHEDULER_INTERVAL_HOURS", "0") or "0")
 
-    # Legacy Plex config - create a server if URL and token exist
     legacy_plex_url = env_vars.get("PLEX_URL", "")
     legacy_plex_token = env_vars.get("PLEX_TOKEN", "")
     legacy_server_name = env_vars.get("PLEX_SERVER_NAME", "")
@@ -248,8 +250,10 @@ def _migrate_legacy_config(config_dir: Path) -> Config | None:
             )
         )
 
-    # Rename .env to .env.bak
-    env_file.rename(config_dir / ".env.bak")
+    backup = config_dir / ".env.bak"
+    env_file.rename(backup)
+    if os.name != "nt":
+        backup.chmod(0o600)
     logger.info("Renamed .env to .env.bak")
 
     logger.info("Migration complete: created config.json")

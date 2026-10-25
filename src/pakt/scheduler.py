@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, Callable
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.interval import IntervalTrigger
+
+from pakt.config import get_last_sync
 
 if TYPE_CHECKING:
     from pakt.config import Config
@@ -24,20 +26,11 @@ class SyncScheduler:
         sync_func: Callable[[], Any],
         is_running_func: Callable[[], bool],
     ) -> None:
-        """Initialize the scheduler.
-
-        Args:
-            config: Application configuration
-            sync_func: Async function to run sync
-            is_running_func: Function to check if sync is currently running
-        """
         self.config = config
         self.sync_func = sync_func
         self.is_running_func = is_running_func
         self.scheduler = AsyncIOScheduler()
         self._job_id = "pakt_sync"
-        self._last_run: datetime | None = None
-        self._next_run: datetime | None = None
 
     def start(self) -> None:
         """Start the scheduler if enabled in config."""
@@ -51,7 +44,6 @@ class SyncScheduler:
 
         self._add_job()
         self.scheduler.start()
-        self._refresh_next_run()
         logger.info(
             f"Scheduler started with {self.config.scheduler.interval_hours}h interval"
         )
@@ -62,9 +54,17 @@ class SyncScheduler:
             self.scheduler.shutdown(wait=False)
             logger.info("Scheduler stopped")
 
+    def _first_run(self) -> datetime:
+        """When the next sync is due: an interval after the last one, at least a minute away."""
+        soon = datetime.now(timezone.utc) + timedelta(minutes=1)
+        last = get_last_sync()
+        if last is None:
+            return soon
+        return max(soon, last + timedelta(hours=self.config.scheduler.interval_hours))
+
     def _add_job(self) -> None:
         """Add or update the sync job."""
-        trigger = IntervalTrigger(hours=self.config.scheduler.interval_hours)
+        trigger = IntervalTrigger(hours=self.config.scheduler.interval_hours, start_date=self._first_run())
 
         if self.scheduler.get_job(self._job_id):
             self.scheduler.reschedule_job(self._job_id, trigger=trigger)
@@ -82,17 +82,6 @@ class SyncScheduler:
                 max_instances=1,
             )
 
-        self._refresh_next_run()
-
-    def _refresh_next_run(self) -> None:
-        """Cache the next fire time.
-
-        A job queued before the scheduler starts is pending and carries no
-        next_run_time at all, so this has to tolerate the attribute being absent.
-        """
-        job = self.scheduler.get_job(self._job_id)
-        self._next_run = getattr(job, "next_run_time", None)
-
     async def _run_sync(self) -> None:
         """Execute the sync if not already running."""
         if self.is_running_func():
@@ -100,29 +89,19 @@ class SyncScheduler:
             return
 
         logger.info("Starting scheduled sync")
-        self._last_run = datetime.now()
-
         try:
             await self.sync_func()
         except Exception as e:
             logger.error(f"Scheduled sync failed: {e}")
-        finally:
-            self._refresh_next_run()
 
     def update_config(self, enabled: bool, interval_hours: int) -> None:
-        """Update scheduler configuration.
-
-        Args:
-            enabled: Whether scheduler should be enabled
-            interval_hours: Hours between syncs
-        """
+        """Update scheduler configuration, dropping the job when disabled or the interval is bad."""
         self.config.scheduler.enabled = enabled
         self.config.scheduler.interval_hours = interval_hours
 
         if not enabled:
             if self.scheduler.get_job(self._job_id):
                 self.scheduler.remove_job(self._job_id)
-                self._next_run = None
             logger.info("Scheduler disabled")
             return
 
@@ -131,7 +110,6 @@ class SyncScheduler:
             # while config and UI both report it as off.
             if self.scheduler.get_job(self._job_id):
                 self.scheduler.remove_job(self._job_id)
-                self._next_run = None
             logger.warning("Invalid interval, scheduler disabled")
             return
 
@@ -141,19 +119,13 @@ class SyncScheduler:
         else:
             self._add_job()
 
-        self._refresh_next_run()
         logger.info(f"Scheduler updated: {interval_hours}h interval")
 
     @property
     def next_run(self) -> datetime | None:
-        """Get the next scheduled run time."""
+        """Get the next scheduled run time; a job queued before start() has none yet."""
         job = self.scheduler.get_job(self._job_id)
         return getattr(job, "next_run_time", None)
-
-    @property
-    def last_run(self) -> datetime | None:
-        """Get the last run time."""
-        return self._last_run
 
     @property
     def is_enabled(self) -> bool:
@@ -166,5 +138,5 @@ class SyncScheduler:
             "enabled": self.is_enabled,
             "interval_hours": self.config.scheduler.interval_hours,
             "next_run": self.next_run.isoformat() if self.next_run else None,
-            "last_run": self._last_run.isoformat() if self._last_run else None,
+            "last_run": last.isoformat() if (last := get_last_sync()) else None,
         }

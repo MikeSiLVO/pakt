@@ -48,7 +48,6 @@ interrupted write cannot leave a truncated config behind.
   ],
   "trakt": {
     "client_id": "...",
-    "client_secret": "...",
     "access_token": "...",
     "refresh_token": "...",
     "expires_at": 1234567890
@@ -68,6 +67,7 @@ Web server settings for `pakt serve`.
 |-------|------|---------|-------------|
 | `host` | string | `"127.0.0.1"` | IP address to bind to. Use `"0.0.0.0"` to allow external access. |
 | `port` | integer | `7258` | Port number. Default is "PAKT" on phone keypad. |
+| `allowed_hosts` | list | `[]` | Host names the web UI answers to besides `localhost` and IP addresses, such as a reverse proxy domain. Any other name gets a 403. |
 
 ---
 
@@ -106,7 +106,15 @@ Automatic sync scheduling. Only active while `pakt serve` is running.
 
 ### `plex_token`
 
-Your Plex account token, used for server discovery. Set automatically by `pakt setup`.
+Your Plex account token, used for server discovery and the watchlist. It is only ever sent to
+plex.tv. Set automatically by `pakt setup`.
+
+---
+
+### `plex_client_id`
+
+The device ID Pakt uses with Plex, set on first use. Plex lists Pakt under this ID in your
+authorized devices, so changing it shows Pakt as a new device.
 
 ---
 
@@ -119,7 +127,7 @@ List of configured Plex servers.
 | `name` | string | Unique identifier for this server config |
 | `server_name` | string | Actual Plex server name (for discovery) |
 | `url` | string | Direct URL to server (e.g., `http://192.168.1.100:32400`) |
-| `token` | string | Server access token |
+| `token` | string | The server's own access token, or the token you gave for a manually added server |
 | `enabled` | boolean | Whether to include in sync |
 | `movie_libraries` | array | Movie libraries to sync (empty = all) |
 | `show_libraries` | array | Show libraries to sync (empty = all) |
@@ -150,7 +158,6 @@ Trakt API credentials and tokens. Managed automatically by `pakt login`.
 | Field | Type | Description |
 |-------|------|-------------|
 | `client_id` | string | Trakt API client ID (default provided) |
-| `client_secret` | string | Trakt API client secret (default provided) |
 | `access_token` | string | OAuth access token |
 | `refresh_token` | string | OAuth refresh token |
 | `expires_at` | integer | Token expiration timestamp |

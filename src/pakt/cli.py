@@ -7,7 +7,9 @@ import sys
 import time
 
 import click
+import httpx
 from rich.console import Console
+from rich.markup import escape
 from rich.table import Table
 
 from pakt import __version__
@@ -27,7 +29,7 @@ def main():
 def _make_token_refresh_callback(config: Config):
     """Create a callback that saves tokens when they're refreshed."""
     def on_token_refresh(token: dict):
-        """Persist rotated Trakt tokens; refresh tokens are single-use so losing one forces a re-login."""
+        """Persist rotated Trakt tokens to config.json."""
         config.save_trakt_token(token)
     return on_token_refresh
 
@@ -69,7 +71,8 @@ def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_
         on_token_refresh=_make_token_refresh_callback(config),
     ))
 
-    console.print("\n[bold green]Sync complete![/]")
+    title = "[bold yellow]Sync finished with errors[/]" if result.errors else "[bold green]Sync complete![/]"
+    console.print(f"\n{title}")
     console.print(f"  Added to Trakt: {result.added_to_trakt}")
     console.print(f"  Added to Plex: {result.added_to_plex}")
     console.print(f"  Ratings synced: {result.ratings_synced}")
@@ -80,41 +83,38 @@ def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_
     if result.errors:
         console.print(f"\n[yellow]Errors ({len(result.errors)}):[/]")
         for error in result.errors[:10]:
-            console.print(f"  - {error}")
+            console.print(f"  - {escape(error)}")
+        sys.exit(1)
+
+
+async def _trakt_device_login(config: Config) -> bool:
+    """Run Trakt's device login, showing the code; saves the tokens and returns True on success."""
+    client = TraktClient(config.trakt)
+    console.print("[cyan]Getting device code...[/]")
+    device = await client.device_code()
+
+    console.print(f"\n[bold]→ Go to:[/] [cyan]{device['verification_url']}[/]")
+    console.print(f"[bold]→ Enter:[/] [bold yellow]{device['user_code']}[/]")
+    console.print("\n[dim]Waiting for authorization...[/]")
+
+    result = await client.poll_device_token(
+        device["device_code"],
+        interval=device.get("interval", 5),
+        expires_in=device.get("expires_in", 600),
+    )
+    if result.status == DeviceAuthStatus.SUCCESS and result.token:
+        config.save_trakt_token(result.token)
+        console.print("\n[green]✓ Trakt authenticated![/]")
+        return True
+    console.print(f"\n[red]✗ {result.message}[/]")
+    return False
 
 
 @main.command()
 def login():
     """Authenticate with Trakt using device code flow."""
-    config = Config.load()
-
-    async def do_auth():
-        """Run the Trakt device flow and store the resulting tokens."""
-        async with TraktClient(config.trakt) as client:
-            console.print("[cyan]Getting device code...[/]")
-            device = await client.device_code()
-
-            console.print(f"\n[bold]→ Go to:[/] [cyan]{device['verification_url']}[/]")
-            console.print(f"[bold]→ Enter:[/] [bold yellow]{device['user_code']}[/]")
-            console.print("\n[dim]Waiting for authorization...[/]")
-
-            result = await client.poll_device_token(
-                device["device_code"],
-                interval=device.get("interval", 5),
-                expires_in=device.get("expires_in", 600),
-            )
-
-            if result.status == DeviceAuthStatus.SUCCESS and result.token:
-                config.trakt.access_token = result.token["access_token"]
-                config.trakt.refresh_token = result.token["refresh_token"]
-                config.trakt.expires_at = result.token["created_at"] + result.token["expires_in"]
-                config.save()
-                console.print("\n[green]✓ Successfully authenticated with Trakt![/]")
-            else:
-                console.print(f"\n[red]✗ {result.message}[/]")
-                sys.exit(1)
-
-    asyncio.run(do_auth())
+    if not asyncio.run(_trakt_device_login(Config.load())):
+        sys.exit(1)
 
 
 @main.command()
@@ -128,21 +128,22 @@ def logout():
 
     async def do_logout():
         """Revoke the token on Trakt, then clear it locally either way."""
-        async with TraktClient(config.trakt) as client:
-            console.print("[cyan]Revoking Trakt access token...[/]")
-            success = await client.revoke_token()
+        console.print("[cyan]Revoking Trakt access token...[/]")
+        try:
+            success = await TraktClient(config.trakt).revoke_token()
+        except httpx.HTTPError:
+            success = False
 
-            if success:
-                console.print("[green]Token revoked successfully.[/]")
-            else:
-                console.print("[yellow]Token revocation failed, clearing local tokens anyway.[/]")
+        if success:
+            console.print("[green]Token revoked successfully.[/]")
+        else:
+            console.print("[yellow]Token revocation failed, clearing local tokens anyway.[/]")
 
-            # Clear local tokens regardless
-            config.trakt.access_token = ""
-            config.trakt.refresh_token = ""
-            config.trakt.expires_at = 0
-            config.save()
-            console.print("[green]Logged out from Trakt.[/]")
+        config.trakt.access_token = ""
+        config.trakt.refresh_token = ""
+        config.trakt.expires_at = 0
+        config.save()
+        console.print("[green]Logged out from Trakt.[/]")
 
     asyncio.run(do_logout())
 
@@ -150,10 +151,7 @@ def logout():
 @main.command()
 @click.option("--token", is_flag=True, help="Use manual token entry instead of PIN auth")
 def setup(token: bool):
-    """Interactive setup wizard - configure Trakt and Plex.
-
-    By default uses Plex PIN authentication. Use --token for manual token entry.
-    """
+    """Interactive setup wizard: link Trakt, then Plex by PIN or a pasted token."""
     config = Config.load()
 
     console.print("\n[bold cyan]═══ Pakt Setup Wizard ═══[/]\n")
@@ -177,34 +175,7 @@ def setup(token: bool):
     if not trakt_done:
         console.print("[bold]Step 1: Trakt Authentication[/]\n")
 
-        async def do_auth():
-            """Run the Trakt device flow during the setup wizard."""
-            async with TraktClient(config.trakt) as client:
-                console.print("[cyan]Getting device code...[/]")
-                device = await client.device_code()
-
-                console.print(f"\n[bold]→ Go to:[/] [cyan]{device['verification_url']}[/]")
-                console.print(f"[bold]→ Enter:[/] [bold yellow]{device['user_code']}[/]")
-                console.print("\n[dim]Waiting for you to authorize...[/]")
-
-                result = await client.poll_device_token(
-                    device["device_code"],
-                    interval=device.get("interval", 5),
-                    expires_in=device.get("expires_in", 600),
-                )
-
-                if result.status == DeviceAuthStatus.SUCCESS and result.token:
-                    config.trakt.access_token = result.token["access_token"]
-                    config.trakt.refresh_token = result.token["refresh_token"]
-                    config.trakt.expires_at = result.token["created_at"] + result.token["expires_in"]
-                    config.save()
-                    console.print("\n[green]✓ Trakt authenticated![/]")
-                    return True
-                else:
-                    console.print(f"\n[red]✗ {result.message}[/]")
-                    return False
-
-        if not asyncio.run(do_auth()):
+        if not asyncio.run(_trakt_device_login(config)):
             console.print("\n[yellow]Setup incomplete. Run 'pakt setup' to try again.[/]")
             return
     else:
@@ -235,14 +206,13 @@ def setup(token: bool):
 
 
 def _setup_plex_manual(config: Config) -> None:
-    """Manual Plex token setup (legacy flow)."""
+    """Set up Plex from a pasted URL and token, testing the connection before saving."""
     from pakt.plex import PlexClient
 
     # Try to auto-detect local Plex
     console.print("[dim]Checking for local Plex server...[/]")
     detected_url = None
     try:
-        import httpx
         resp = httpx.get("http://localhost:32400/identity", timeout=2)
         if resp.status_code == 200:
             detected_url = "http://localhost:32400"
@@ -284,9 +254,8 @@ def _setup_plex_manual(config: Config) -> None:
         libs = plex.get_movie_libraries() + plex.get_show_libraries()
         console.print(f"[green]✓[/] Libraries: {', '.join(libs)}")
 
-        # Save the server to config
         config.plex_token = plex_token
-        config.servers.append(server_config)
+        config.servers = [s for s in config.servers if s.name != server_config.name] + [server_config]
         config.save()
     except Exception as e:
         console.print(f"[red]✗ Connection failed:[/] {e}")
@@ -294,7 +263,7 @@ def _setup_plex_manual(config: Config) -> None:
 
 
 def _setup_plex_pin(config: Config) -> None:
-    """Plex PIN authentication flow with server discovery."""
+    """Set up Plex by PIN login, then add the servers picked from the account."""
     from pakt.plex import (
         check_plex_pin_login,
         discover_servers,
@@ -348,18 +317,20 @@ def _setup_plex_pin(config: Config) -> None:
         console.print(f"  {i}. {server.name} ({owned}) {local}")
 
     # Select servers to enable
-    console.print("\n[dim]Enter server numbers to enable (comma-separated), or 'all':[/]")
-    selection = click.prompt("Enable servers", default="all")
+    console.print("\n[dim]Enter server numbers to enable (comma-separated), 'owned' or 'all':[/]")
+    selection = click.prompt("Enable servers", default="owned")
 
     if selection.lower() == "all":
         selected_servers = discovered
+    elif selection.lower() == "owned":
+        selected_servers = [s for s in discovered if s.owned]
     else:
         try:
             indices = [int(x.strip()) - 1 for x in selection.split(",")]
             selected_servers = [discovered[i] for i in indices if 0 <= i < len(discovered)]
         except (ValueError, IndexError):
-            console.print("[yellow]Invalid selection, enabling all servers[/]")
-            selected_servers = discovered
+            console.print("[yellow]Invalid selection, enabling owned servers[/]")
+            selected_servers = [s for s in discovered if s.owned]
 
     # Create ServerConfig for each selected server
     for server in selected_servers:
@@ -369,13 +340,13 @@ def _setup_plex_pin(config: Config) -> None:
             console.print(f"  [dim]Server '{server.name}' already configured, updating...[/]")
             existing.server_name = server.name
             existing.url = server.best_connection_url or ""
-            existing.token = account_token
+            existing.token = server.access_token
         else:
             server_config = ServerConfig(
                 name=server.name,
                 server_name=server.name,
                 url=server.best_connection_url or "",
-                token=account_token,
+                token=server.access_token,
                 enabled=True,
             )
             config.servers.append(server_config)
@@ -441,6 +412,7 @@ def serve(host: str | None, port: int | None, tray: bool | None):
     host = host or config.web.host
     port = port or config.web.port
     config.save()
+    local_url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::', '') else host}:{port}"
 
     # Only show tray when explicitly requested with --tray
     show_tray = tray is True
@@ -515,7 +487,7 @@ def serve(host: str | None, port: int | None, tray: bool | None):
             if TRAY_AVAILABLE:
                 if not port_in_use:
                     log("Creating PaktTray instance")
-                web_url = f"http://{host}:{port}"
+                web_url = local_url
 
                 def on_exit():
                     """Hard exit from the tray menu; uvicorn is on another thread."""
@@ -524,8 +496,6 @@ def serve(host: str | None, port: int | None, tray: bool | None):
 
                 def trigger_sync():
                     """Start a sync over the local API, since the tray runs off the event loop."""
-                    import httpx
-
                     try:
                         httpx.post(f"{web_url}/api/sync", json={}, timeout=10.0)
                     except Exception as e:
@@ -586,18 +556,14 @@ def serve(host: str | None, port: int | None, tray: bool | None):
 
     if not silent_mode:
         console.print("[bold]Starting Pakt web interface...[/]")
-        console.print(f"Open [cyan]http://{host}:{port}[/] in your browser")
+        console.print(f"Open [cyan]{local_url}[/] in your browser")
         console.print("[dim]Press Ctrl+C to stop[/]\n")
 
     log("Creating app")
     app = create_app()
 
     class PaktServer(uvicorn.Server):
-        """Server whose first Ctrl+C cancels a running sync rather than cutting it mid-write.
-
-        uvicorn installs its own SIGINT handler inside serve(), so overriding this
-        is the only way to get a look at the signal.
-        """
+        """Server whose first Ctrl+C cancels a running sync instead of cutting it mid-write."""
 
         def handle_exit(self, sig, frame) -> None:
             """Cancel a running sync on the first signal, shut down on the next."""
@@ -622,7 +588,7 @@ def serve(host: str | None, port: int | None, tray: bool | None):
         if tray_instance and tray_instance._icon:
             try:
                 log("Sending startup notification")
-                tray_instance._icon.notify(f"Running on http://{host}:{port}", "Pakt")
+                tray_instance._icon.notify(f"Running on {local_url}", "Pakt")
             except Exception as e:
                 log(f"Notification failed: {e}")
 
@@ -651,10 +617,7 @@ def serve(host: str | None, port: int | None, tray: bool | None):
 @click.option("--show", "-s", multiple=True, help="Show libraries to sync (can specify multiple)")
 @click.option("--all", "sync_all", is_flag=True, help="Sync all libraries (clear selection)")
 def libraries(server: str | None, movie: tuple[str, ...], show: tuple[str, ...], sync_all: bool):
-    """Configure which Plex libraries to sync.
-
-    Run without options to see available libraries and current selection.
-    """
+    """Configure which Plex libraries to sync, or list them when run without options."""
     from pakt.plex import PlexClient
 
     config = Config.load()
@@ -676,7 +639,7 @@ def libraries(server: str | None, movie: tuple[str, ...], show: tuple[str, ...],
 
     # Connect to Plex to get available libraries
     try:
-        plex = PlexClient(server_config)
+        plex = PlexClient(server_config, account_token=config.plex_token)
         plex.connect()
     except Exception as e:
         console.print(f"[red]Error connecting to Plex:[/] {e}")
@@ -692,18 +655,15 @@ def libraries(server: str | None, movie: tuple[str, ...], show: tuple[str, ...],
             server_config.show_libraries = []
             console.print("[green]✓[/] Set to sync all libraries")
         else:
+            invalid = [m for m in movie if m not in available_movie_libs]
+            invalid += [s for s in show if s not in available_show_libs]
+            if invalid:
+                console.print(f"[red]Error:[/] Unknown libraries: {', '.join(invalid)}. Nothing was changed.")
+                sys.exit(1)
             if movie:
-                # Validate library names
-                invalid = [m for m in movie if m not in available_movie_libs]
-                if invalid:
-                    console.print(f"[yellow]Warning:[/] Unknown movie libraries: {', '.join(invalid)}")
-                server_config.movie_libraries = [m for m in movie if m in available_movie_libs]
-
+                server_config.movie_libraries = list(movie)
             if show:
-                invalid = [s for s in show if s not in available_show_libs]
-                if invalid:
-                    console.print(f"[yellow]Warning:[/] Unknown show libraries: {', '.join(invalid)}")
-                server_config.show_libraries = [s for s in show if s in available_show_libs]
+                server_config.show_libraries = list(show)
 
         config.save()
         console.print("[green]✓[/] Configuration saved")
@@ -824,12 +784,7 @@ def servers_discover():
 @click.option("--token", "server_token", help="Server token (for manual entry)")
 @click.option("--disabled", is_flag=True, help="Add server as disabled")
 def servers_add(name: str, url: str | None, server_token: str | None, disabled: bool):
-    """Add a Plex server.
-
-    NAME can be:
-    - The name of a discovered server (from 'pakt servers discover')
-    - Any name if --url and --token are provided for manual entry
-    """
+    """Add a Plex server, found through the account or entered by hand."""
     from pakt.plex import discover_servers
 
     config = Config.load()
@@ -885,7 +840,7 @@ def servers_add(name: str, url: str | None, server_token: str | None, disabled: 
         name=matching.name,
         server_name=matching.name,
         url=matching.best_connection_url or "",
-        token=config.plex_token,
+        token=matching.access_token,
         enabled=not disabled,
     )
     config.servers.append(new_server)
@@ -925,7 +880,7 @@ def servers_test(name: str):
     console.print(f"[dim]Testing connection to {name}...[/]")
 
     try:
-        plex = PlexClient(server)
+        plex = PlexClient(server, account_token=config.plex_token)
         plex.connect()
         console.print(f"[green]✓[/] Connected to: {plex.server.friendlyName}")
 

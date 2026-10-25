@@ -210,6 +210,9 @@ Or use CLI flags: `pakt serve --host 0.0.0.0 --port 9000`
 The web UI has no login, so binding to `0.0.0.0` gives anyone on your network full control. Keep the
 default `127.0.0.1` unless you trust the network or sit it behind an authenticating reverse proxy.
 
+To reach the web UI by another host name, set `web.allowed_hosts` (see
+[Configuration](https://github.com/MikeSiLVO/Pakt/blob/main/docs/configuration.md)).
+
 ## Trakt Account Limits
 
 Free Trakt accounts have a 100-item limit on collections and watchlists. Pakt will warn you if you hit these limits. Upgrade to [Trakt VIP](https://trakt.tv/vip) for unlimited.
@@ -222,6 +225,17 @@ Having issues? See the [Troubleshooting Guide](https://github.com/MikeSiLVO/Pakt
 
 See [CHANGELOG.md](https://github.com/MikeSiLVO/Pakt/blob/main/CHANGELOG.md) for release history.
 
+## Privacy
+
+Pakt runs on your own machine and has no server of its own. It talks only to Plex and Trakt. Your
+tokens, settings and sync logs stay in the Pakt config folder until you delete them.
+
+`pakt logout` (or Logout in the web UI) revokes Pakt's Trakt access. You can also disconnect it in
+Trakt's [Connected Apps](https://app.trakt.tv/settings/apps/connected). Deleting the config folder
+removes everything Pakt stored.
+
 ## License
 
 MIT
+
+Pakt uses Trakt but is not endorsed or certified by Trakt.

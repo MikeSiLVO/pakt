@@ -29,7 +29,6 @@ class SyncResult(BaseModel):
     watchlist_added_trakt: int = 0
     watchlist_added_plex: int = 0
     errors: list[str] = Field(default_factory=list)
-    skipped: int = 0
     duration_seconds: float = 0.0
 
 

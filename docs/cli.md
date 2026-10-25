@@ -43,7 +43,7 @@ Authenticate with Trakt using device code flow.
 pakt login
 ```
 
-Opens Trakt device authorization. You'll get a code to enter at trakt.tv/activate.
+Opens Trakt device authorization. You'll get a code to enter at the address Pakt prints.
 
 ---
 
