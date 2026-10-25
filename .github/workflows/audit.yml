@@ -1,0 +1,14 @@
+name: Weekly audit
+
+# kept apart from Checks; GitHub disables a scheduled workflow after 60 days without commits
+on:
+  schedule:
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    uses: ./.github/workflows/checks.yml

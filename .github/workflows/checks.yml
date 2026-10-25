@@ -8,21 +8,23 @@ on:
   pull_request:
     paths-ignore:
       - '**/*.md'
-  # Dependencies are declared as open floors, so a breaking release upstream lands
-  # without any commit here. Installing fresh on a schedule is what surfaces it.
-  schedule:
-    - cron: '0 6 * * 1'
+  workflow_call:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   checks:
     if: github.repository == 'MikeSiLVO/pakt'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
       - name: Set up Python
-        uses: actions/setup-python@v7
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.11"
 
@@ -30,10 +32,18 @@ jobs:
         run: |
           python -m venv .venv
           .venv/bin/python -m pip install --upgrade pip
-          .venv/bin/python -m pip install -e ".[tray,dev]" pyright
+          .venv/bin/python -m pip install -e ".[tray]" -r .github/requirements-ci.txt
 
       - name: Ruff
         run: .venv/bin/python -m ruff check src/
 
       - name: Pyright
         run: .venv/bin/python -m pyright
+
+      - name: Audit installed dependencies
+        run: .venv/bin/python -m pip_audit --skip-editable
+
+      - name: Audit dependency floors
+        run: |
+          .venv/bin/python .github/floors.py > floors.txt
+          .venv/bin/python -m pip_audit --no-deps --disable-pip -r floors.txt
