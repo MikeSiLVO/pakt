@@ -35,10 +35,13 @@ jobs:
           .venv/bin/python -m pip install -e ".[tray]" -r .github/requirements-ci.txt
 
       - name: Ruff
-        run: .venv/bin/python -m ruff check src/
+        run: .venv/bin/python -m ruff check src/ tests/
 
       - name: Pyright
         run: .venv/bin/python -m pyright
+
+      - name: Tests
+        run: .venv/bin/python -m pytest -q
 
       - name: Audit installed dependencies
         run: .venv/bin/python -m pip_audit --skip-editable
