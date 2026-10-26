@@ -9,7 +9,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks
 from pydantic import BaseModel
 
-from pakt.config import Config
+from pakt.config import Config, get_last_sync
 from pakt.models import SyncResult
 from pakt.sync.run import run_multi_server_sync
 from pakt.web import state
@@ -168,13 +168,14 @@ async def cancel_sync() -> dict[str, Any]:
 
 @router.get("/api/scheduler/status")
 async def get_scheduler_status() -> dict[str, Any]:
-    """Get scheduler status, from config alone when no scheduler has started."""
+    """Get scheduler status, from config and the last sync time when no scheduler has started."""
     config = Config.load()
     if state.scheduler:
         return state.scheduler.get_status()
+    last = get_last_sync()
     return {
         "enabled": config.scheduler.enabled,
         "interval_hours": config.scheduler.interval_hours,
         "next_run": None,
-        "last_run": None,
+        "last_run": last.isoformat() if last else None,
     }

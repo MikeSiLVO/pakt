@@ -71,6 +71,7 @@ async def logout_trakt() -> dict[str, Any]:
     config.trakt.expires_at = 0
     config.save()
     state.invalidate_config_cache()
+    state.drop_cached("trakt_account")
 
     return {"status": "ok", "revoked": success}
 

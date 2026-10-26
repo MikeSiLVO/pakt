@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+- **Web UI: Test button on each server** in Settings, showing the server's name and libraries or the error
+- **Web UI: Log out of Trakt** in Settings
+- **Web UI: the scheduler shows the next and last sync**
+
 ### Changed
 - **Clearer sync log** - Every line carries its level and, while a server syncs, the server's name. A run opens with the version, what started it and the servers, and closes with one line of what changed. Phases are named instead of numbered, and each reports one line of what it found and one of what it will change
 - **`--verbose` names skipped items** - Movies and shows skipped for missing IDs or episode numbers are listed, along with items Trakt could not match
@@ -12,6 +17,10 @@
 - **`pakt sync` crashed with a traceback when the Trakt token had expired and its refresh was refused** - It now logs the error and exits with status 1
 - **The web UI said "Sync complete!" after a sync with errors**
 - **Sync errors showed as plain lines in the web UI console**
+- **The setup wizard's "Enter token manually" saved nothing** - The server is now added and tested, and dropped again if the test fails
+
+### Removed
+- **Web API routes `/api/plex/test` and `/api/plex/libraries`** - Use `/api/servers/{name}/test` and `/api/servers/{name}/libraries`. The web API also refuses an unknown `rating_priority` instead of ignoring it
 
 ## [0.5.0] - 2026-10-25
 

@@ -924,6 +924,9 @@
                             <button class="btn-secondary btn-block mt-2" onclick="showReconfigure()">
                                 Reconfigure
                             </button>
+                            <button class="btn-secondary btn-block mt-2" onclick="logoutTrakt()">
+                                Log out of Trakt
+                            </button>
                         </div>
                     </div>
 
@@ -991,6 +994,7 @@
                                 </div>
                             </div>
                             <div id="scheduler-status" class="mt-2" style="font-size: 0.8rem; color: var(--text-dim);"></div>
+                            <div id="scheduler-times" class="mt-2" style="font-size: 0.8rem; color: var(--text-dim);"></div>
                         </div>
                     </div>
 
@@ -1055,6 +1059,7 @@
                 document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
                 loadLibraries();
                 refreshServersInSettings();
+                loadSchedulerTimes();
             }
         }
 
@@ -1215,14 +1220,6 @@
                     return;
                 }
 
-                const resp = await fetch('/api/plex/test', {method: 'POST'});
-                const data = await resp.json();
-                if (data.status === 'ok') {
-                    document.getElementById('step2-start').classList.add('hidden');
-                    document.getElementById('step2-done').classList.remove('hidden');
-                    document.getElementById('plex-setup-result').textContent =
-                        `Connected to ${data.server_name}`;
-                }
             } catch (e) {
             }
         }
@@ -1368,16 +1365,18 @@
             resultBox.classList.remove('hidden');
             resultBox.textContent = 'Testing connection...';
 
-            await fetch('/api/config', {
+            const addResp = await fetch('/api/servers', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({
-                    plex_url: url,
-                    plex_token: token
-                })
+                body: JSON.stringify({name: 'default', url, token})
             });
+            const added = await addResp.json();
+            if (added.status !== 'ok') {
+                resultBox.textContent = 'Error: ' + added.message;
+                return;
+            }
 
-            const resp = await fetch('/api/plex/test', {method: 'POST'});
+            const resp = await fetch('/api/servers/default/test', {method: 'POST'});
             const data = await resp.json();
 
             if (data.status === 'ok') {
@@ -1386,6 +1385,8 @@
                 document.getElementById('plex-setup-result').textContent =
                     `Connected to ${data.server_name}`;
             } else {
+                // a server that failed its test is dropped, freeing its name for a corrected entry
+                await fetch('/api/servers/default', {method: 'DELETE'});
                 resultBox.textContent = 'Error: ' + data.message;
             }
         }
@@ -1691,6 +1692,31 @@
             status.textContent = 'Saved';
             status.style.color = 'var(--success)';
             setTimeout(() => { status.textContent = ''; }, 2000);
+            loadSchedulerTimes();
+        }
+
+        async function loadSchedulerTimes() {
+            const times = document.getElementById('scheduler-times');
+            try {
+                const resp = await fetch('/api/scheduler/status');
+                const data = await resp.json();
+                const parts = [];
+                if (data.enabled && data.next_run) {
+                    parts.push('Next sync: ' + new Date(data.next_run).toLocaleString());
+                }
+                if (data.last_run) {
+                    parts.push('Last sync: ' + new Date(data.last_run).toLocaleString());
+                }
+                times.textContent = parts.join(' · ');
+            } catch (e) {
+                times.textContent = '';
+            }
+        }
+
+        async function logoutTrakt() {
+            if (!confirm('Log out of Trakt? Pakt stops syncing until you connect Trakt again.')) return;
+            await fetch('/api/trakt/logout', {method: 'POST'});
+            loadStatus();
         }
 
         async function loadTraktAccount() {
@@ -1792,12 +1818,17 @@
                     const status = server.enabled
                         ? '<span style="color: var(--success);">Enabled</span>'
                         : '<span style="color: var(--text-dim);">Disabled</span>';
-                    return `<div style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border);">
+                    return `<div class="server-row" style="display: flex; justify-content: space-between; align-items: center; padding: 0.5rem 0; border-bottom: 1px solid var(--border);">
                         <div>
                             <strong>${escapeHtml(server.name)}</strong>
                             <span style="margin-left: 0.5rem; font-size: 0.8rem;">${status}</span>
+                            <div class="server-test-result" style="font-size: 0.8rem;"></div>
                         </div>
                         <div style="display: flex; gap: 0.5rem;">
+                            <button class="btn-secondary" style="padding: 0.25rem 0.5rem; font-size: 0.8rem;"
+                                data-action="test" data-server="${escapeHtml(server.name)}">
+                                Test
+                            </button>
                             <button class="btn-secondary" style="padding: 0.25rem 0.5rem; font-size: 0.8rem;"
                                 data-action="toggle" data-server="${escapeHtml(server.name)}" data-enabled="${!server.enabled}">
                                 ${server.enabled ? 'Disable' : 'Enable'}
@@ -1813,7 +1844,10 @@
                 // wired here, not inline: a handler attribute decodes the escaped name back into script
                 container.querySelectorAll('button[data-action]').forEach(btn => {
                     const name = btn.dataset.server;
-                    if (btn.dataset.action === 'toggle') {
+                    if (btn.dataset.action === 'test') {
+                        const result = btn.closest('.server-row').querySelector('.server-test-result');
+                        btn.addEventListener('click', () => testServer(name, result));
+                    } else if (btn.dataset.action === 'toggle') {
                         btn.addEventListener('click', () => toggleServer(name, btn.dataset.enabled === 'true'));
                     } else {
                         btn.addEventListener('click', () => removeServer(name));
@@ -1821,6 +1855,26 @@
                 });
             } catch (e) {
                 container.innerHTML = '<span style="color: var(--error);">Error loading servers</span>';
+            }
+        }
+
+        async function testServer(name, result) {
+            result.textContent = 'Testing...';
+            result.style.color = 'var(--text-dim)';
+            try {
+                const resp = await fetch(`/api/servers/${encodeURIComponent(name)}/test`, {method: 'POST'});
+                const data = await resp.json();
+                if (data.status === 'ok') {
+                    result.textContent = `Connected to ${data.server_name}: ` +
+                        `${data.movie_libraries.length} movie, ${data.show_libraries.length} show libraries`;
+                    result.style.color = 'var(--success)';
+                } else {
+                    result.textContent = 'Failed: ' + data.message;
+                    result.style.color = 'var(--error)';
+                }
+            } catch (e) {
+                result.textContent = 'Failed: ' + e.message;
+                result.style.color = 'var(--error)';
             }
         }
 

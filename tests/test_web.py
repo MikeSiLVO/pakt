@@ -1,8 +1,12 @@
+from datetime import datetime, timezone
+from types import SimpleNamespace
+
 import pytest
 from fastapi.testclient import TestClient
 
 from pakt import trakt
-from pakt.config import Config, ServerConfig
+from pakt.config import Config, ServerConfig, set_last_sync
+from pakt.plex import client as plex_client
 from pakt.web import app as web_app
 from pakt.web import state
 from pakt.web.auth import MAX_FAILURES, hash_password
@@ -247,6 +251,54 @@ def test_config_update_applies_sync_settings_and_rejects_bad_ones():
     sync = Config.load().sync
     assert sync.watched_plex_to_trakt is False and sync.rating_priority == "trakt" and sync.watched_trakt_to_plex
     assert client.post("/api/config", json={"rating_priority": "bogus"}).status_code == 422
+
+
+class ReachablePlex:
+    """PlexClient stand-in for a server that answers with two libraries."""
+
+    def __init__(self, server_config, account_token=""):
+        self.server = SimpleNamespace(friendlyName="Living Room")
+
+    def connect(self):
+        """Connect at once."""
+
+    def get_library_names(self):
+        """Get one movie and one show library."""
+        return {"movie": ["Movies"], "show": ["TV Shows"]}
+
+
+def test_server_added_by_url_and_token_can_be_tested(monkeypatch):
+    """The setup wizard's manual path adds a server by URL and token, then tests it by name."""
+    monkeypatch.setattr(plex_client, "PlexClient", ReachablePlex)
+    client = local_client()
+    added = client.post("/api/servers", json={"name": "default", "url": "http://192.168.1.5:32400", "token": "t"})
+    assert added.json()["status"] == "ok"
+    tested = client.post("/api/servers/default/test").json()
+    assert tested == {"status": "ok", "server_name": "Living Room",
+                      "movie_libraries": ["Movies"], "show_libraries": ["TV Shows"]}
+
+
+def test_trakt_logout_clears_the_tokens(monkeypatch):
+    """Logging out of Trakt revokes the token and forgets both tokens."""
+    async def revoke_token(self):
+        """Stand in for Trakt accepting the revocation."""
+        return True
+
+    monkeypatch.setattr(trakt.TraktClient, "revoke_token", revoke_token)
+    config = Config.load()
+    config.trakt.access_token, config.trakt.refresh_token = "a", "r"
+    config.save()
+    assert local_client().post("/api/trakt/logout").json() == {"status": "ok", "revoked": True}
+    saved = Config.load().trakt
+    assert saved.access_token == "" and saved.refresh_token == ""
+
+
+def test_scheduler_status_shows_the_last_sync_when_off():
+    """With the scheduler off, the status still carries when the last sync finished."""
+    finished = datetime(2026, 10, 27, 6, 1, tzinfo=timezone.utc)
+    set_last_sync(finished)
+    status = local_client().get("/api/scheduler/status").json()
+    assert status["next_run"] is None and status["last_run"] == finished.isoformat()
 
 
 def test_trakt_client_id_cannot_be_changed_over_the_api():
