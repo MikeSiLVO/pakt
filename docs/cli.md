@@ -37,7 +37,7 @@ pakt setup --token      # Manual token entry
 
 ### `pakt login`
 
-Authenticate with Trakt using device code flow.
+Log in to Trakt using device code flow.
 
 ```bash
 pakt login
@@ -227,7 +227,7 @@ By default, all libraries are synced. Use `-m` and `-s` to limit to specific lib
 
 ### `pakt serve`
 
-Start the web interface.
+Serve the web interface, with a tray icon when asked.
 
 ```bash
 pakt serve                    # Start on default port (7258)

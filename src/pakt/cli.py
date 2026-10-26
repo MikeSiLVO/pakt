@@ -5,13 +5,12 @@ from __future__ import annotations
 import logging
 import os
 import sys
-import time
 
 import click
 from rich.console import Console
 from rich.table import Table
 
-from pakt import __version__
+from pakt import __version__, prompts
 from pakt.config import Config, ServerConfig, get_config_dir
 from pakt.log import setup_logging
 
@@ -68,37 +67,12 @@ def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_
         sys.exit(1)
 
 
-async def _trakt_device_login(config: Config) -> bool:
-    """Run Trakt's device login, showing the code; saves the tokens and returns True on success."""
-    from pakt.trakt import DeviceAuthStatus, TraktClient
-
-    client = TraktClient(config.trakt)
-    console.print("[cyan]Getting device code...[/]")
-    device = await client.device_code()
-
-    console.print(f"\n[bold]→ Go to:[/] [cyan]{device['verification_url']}[/]")
-    console.print(f"[bold]→ Enter:[/] [bold yellow]{device['user_code']}[/]")
-    console.print("\n[dim]Waiting for authorization...[/]")
-
-    result = await client.poll_device_token(
-        device["device_code"],
-        interval=device.get("interval", 5),
-        expires_in=device.get("expires_in", 600),
-    )
-    if result.status == DeviceAuthStatus.SUCCESS and result.token:
-        config.save_trakt_token(result.token)
-        console.print("\n[green]✓ Trakt authenticated![/]")
-        return True
-    console.print(f"\n[red]✗ {result.message}[/]")
-    return False
-
-
 @main.command()
 def login():
-    """Authenticate with Trakt using device code flow."""
+    """Log in to Trakt using device code flow."""
     import asyncio
 
-    if not asyncio.run(_trakt_device_login(Config.load())):
+    if not asyncio.run(prompts.trakt_device_login(Config.load())):
         sys.exit(1)
 
 
@@ -165,7 +139,7 @@ def setup(token: bool):
         console.print("[bold]Step 1: Trakt Authentication[/]\n")
         import asyncio
 
-        if not asyncio.run(_trakt_device_login(config)):
+        if not asyncio.run(prompts.trakt_device_login(config)):
             console.print("\n[yellow]Setup incomplete. Run 'pakt setup' to try again.[/]")
             return
     else:
@@ -175,9 +149,9 @@ def setup(token: bool):
         console.print("\n[bold]Step 2: Plex Connection[/]\n")
 
         if token:
-            _setup_plex_manual(config)
+            prompts.setup_plex_manual(config)
         else:
-            _setup_plex_pin(config)
+            prompts.setup_plex_pin(config)
 
     else:
         console.print("[green]✓[/] Plex: Already configured")
@@ -187,7 +161,7 @@ def setup(token: bool):
         "\nSet a password for opening the web UI from another device?",
         default=os.path.exists("/.dockerenv"),
     ):
-        _prompt_web_password(config)
+        prompts.prompt_web_password(config)
 
     console.print("\n[bold green]═══ Setup Complete! ═══[/]\n")
     console.print("You're ready to sync. Try these commands:")
@@ -195,23 +169,6 @@ def setup(token: bool):
     console.print("  [cyan]pakt sync[/]           - Run the sync")
     console.print("  [cyan]pakt serve[/]          - Start web interface")
     console.print("  [cyan]pakt servers list[/]   - View configured servers")
-
-
-def _prompt_web_password(config: Config) -> None:
-    """Prompt for a new web UI password and save its hash with a fresh session secret."""
-    import secrets
-
-    from pakt.web.auth import MIN_PASSWORD_LENGTH, hash_password
-
-    while True:
-        password = click.prompt("Web UI password", hide_input=True, confirmation_prompt=True)
-        if len(password) >= MIN_PASSWORD_LENGTH:
-            break
-        console.print(f"[yellow]Use at least {MIN_PASSWORD_LENGTH} characters.[/]")
-    config.web.password_hash = hash_password(password)
-    config.web.session_secret = secrets.token_urlsafe(32)
-    config.save()
-    console.print("[green]✓[/] Password saved. Devices that were logged in must log in again.")
 
 
 @main.command()
@@ -225,149 +182,7 @@ def password(clear: bool):
         config.save()
         console.print("[green]✓[/] Password removed. The web UI now only opens on this machine.")
         return
-    _prompt_web_password(config)
-
-
-def _setup_plex_manual(config: Config) -> None:
-    """Set up Plex from a pasted URL and token, testing the connection before saving."""
-    from pakt.plex.client import PlexClient
-
-    console.print("[dim]Checking for local Plex server...[/]")
-    detected_url = None
-    try:
-        import httpx
-
-        resp = httpx.get("http://localhost:32400/identity", timeout=2)
-        if resp.status_code == 200:
-            detected_url = "http://localhost:32400"
-            console.print(f"[green]✓[/] Found Plex at {detected_url}")
-    except Exception:
-        console.print("[dim]No local server found[/]")
-
-    default_url = detected_url or "http://localhost:32400"
-    plex_url = click.prompt("\nPlex server URL", default=default_url)
-
-    console.print("\n[dim]To get your Plex token:")
-    console.print("1. Open Plex Web App and sign in")
-    console.print("2. Open any media item")
-    console.print("3. Click ⋮ → Get Info → View XML")
-    console.print("4. In the URL, find X-Plex-Token=xxxxx")
-    console.print("5. Copy just the token part after the =[/]\n")
-
-    plex_token = click.prompt("Plex token")
-    if plex_token.lower().startswith("x-plex-token="):
-        plex_token = plex_token[13:]
-    elif plex_token.startswith("="):
-        plex_token = plex_token[1:]
-
-    server_config = ServerConfig(
-        name="default",
-        url=plex_url,
-        token=plex_token,
-        enabled=True,
-    )
-
-    console.print("\n[dim]Testing connection...[/]")
-    try:
-        plex = PlexClient(server_config)
-        plex.connect()
-        console.print(f"[green]✓[/] Connected to: {plex.server.friendlyName}")
-        libs = plex.get_movie_libraries() + plex.get_show_libraries()
-        console.print(f"[green]✓[/] Libraries: {', '.join(libs)}")
-
-        config.plex_token = plex_token
-        config.servers = [s for s in config.servers if s.name != server_config.name] + [server_config]
-        config.save()
-    except Exception as e:
-        console.print(f"[red]✗ Connection failed:[/] {e}")
-        console.print("\n[yellow]Check your URL and token, then run 'pakt setup' again.[/]")
-
-
-def _setup_plex_pin(config: Config) -> None:
-    """Set up Plex by PIN login, then add the servers picked from the account."""
-    from pakt.plex.account import (
-        check_plex_pin_login,
-        discover_servers,
-        start_plex_pin_login,
-    )
-
-    console.print("Link your Plex account to discover your servers automatically.\n")
-    console.print("[bold]→ Go to:[/] [cyan]https://plex.tv/link[/]")
-
-    login_obj, auth_info = start_plex_pin_login()
-    console.print(f"[bold]→ Enter:[/] [bold yellow]{auth_info.pin}[/]")
-    console.print("\n[dim]Waiting for you to authorize...[/]")
-
-    account_token = None
-    max_attempts = 60
-    for _ in range(max_attempts):
-        account_token = check_plex_pin_login(login_obj)
-        if account_token:
-            break
-        time.sleep(5)
-
-    if not account_token:
-        console.print("\n[red]✗ Authorization timed out[/]")
-        console.print("[dim]Try again with 'pakt setup' or use 'pakt setup --token' for manual entry[/]")
-        return
-
-    console.print("\n[green]✓ Plex account linked![/]")
-
-    config.plex_token = account_token
-    config.save()
-
-    console.print("\n[dim]Discovering servers...[/]")
-    try:
-        discovered = discover_servers(account_token)
-    except Exception as e:
-        console.print(f"[red]✗ Failed to discover servers:[/] {e}")
-        return
-
-    if not discovered:
-        console.print("[yellow]No servers found on your account[/]")
-        return
-
-    console.print(f"\n[green]Found {len(discovered)} server(s):[/]\n")
-    for i, server in enumerate(discovered, 1):
-        owned = "[green]owned[/]" if server.owned else "[dim]shared[/]"
-        local = "[cyan]local[/]" if server.has_local_connection else ""
-        console.print(f"  {i}. {server.name} ({owned}) {local}")
-
-    console.print("\n[dim]Enter server numbers to enable (comma-separated), 'owned' or 'all':[/]")
-    selection = click.prompt("Enable servers", default="owned")
-
-    if selection.lower() == "all":
-        selected_servers = discovered
-    elif selection.lower() == "owned":
-        selected_servers = [s for s in discovered if s.owned]
-    else:
-        try:
-            indices = [int(x.strip()) - 1 for x in selection.split(",")]
-            selected_servers = [discovered[i] for i in indices if 0 <= i < len(discovered)]
-        except (ValueError, IndexError):
-            console.print("[yellow]Invalid selection, enabling owned servers[/]")
-            selected_servers = [s for s in discovered if s.owned]
-
-    for server in selected_servers:
-        existing = config.get_server(server.name)
-        if existing:
-            console.print(f"  [dim]Server '{server.name}' already configured, updating...[/]")
-            existing.server_name = server.name
-            existing.url = server.best_connection_url or ""
-            existing.token = server.access_token
-        else:
-            server_config = ServerConfig(
-                name=server.name,
-                server_name=server.name,
-                url=server.best_connection_url or "",
-                token=server.access_token,
-                enabled=True,
-            )
-            config.servers.append(server_config)
-            console.print(f"  [green]✓[/] Added server: {server.name}")
-
-    config.save()
-    console.print(f"\n[green]✓ Configured {len(selected_servers)} server(s)[/]")
+    prompts.prompt_web_password(config)
 
 
 @main.command()
@@ -410,144 +225,15 @@ def status():
 @click.option("--port", default=None, type=int, help="Port to bind to (default: from config or 7258)")
 @click.option("--tray/--no-tray", default=None, help="Enable/disable system tray icon")
 def serve(host: str | None, port: int | None, tray: bool | None):
-    """Start the web interface."""
-    import uvicorn
-
-    from pakt.web.app import create_app
-    from pakt.web.state import sync_state
+    """Serve the web interface, with a tray icon when asked."""
+    from pakt.web.server import run_web_ui
 
     # save so config.json gains the web section
     config = Config.load()
     host = host or config.web.host
     port = port or config.web.port
     config.save()
-    local_url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '::', '') else host}:{port}"
-
-    show_tray = tray is True
-
-    # pythonw has no console
-    silent_mode = tray is True
-
-    import socket
-    port_in_use = False
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        sock.bind((host, port))
-        sock.close()
-    except OSError:
-        port_in_use = True
-
-    _devnull = None
-    if silent_mode:
-        try:
-            _devnull = open(os.devnull, 'w')
-            sys.stdout = _devnull
-            sys.stderr = _devnull
-        except Exception:
-            pass
-
-    tray_instance = None
-    if show_tray:
-        try:
-            from pakt.tray import TRAY_AVAILABLE, PaktTray
-
-            if TRAY_AVAILABLE:
-                web_url = local_url
-
-                def on_exit():
-                    """Hard exit from the tray menu; uvicorn is on another thread."""
-                    logger.info("Quit from the tray")
-                    os._exit(0)
-
-                def trigger_sync():
-                    """Start a sync over the local API, since the tray runs off the event loop."""
-                    import httpx
-
-                    try:
-                        httpx.post(f"{web_url}/api/sync", json={}, timeout=10.0)
-                    except Exception as e:
-                        logger.warning(f"The tray could not start a sync: {e}")
-
-                def get_scheduler():
-                    """Get the scheduler, which the web app creates after the tray starts."""
-                    from pakt.web import state
-
-                    return state.scheduler
-
-                tray_instance = PaktTray(
-                    web_url=web_url,
-                    sync_callback=trigger_sync,
-                    shutdown_callback=on_exit,
-                    scheduler_getter=get_scheduler,
-                )
-                tray_instance.start()
-                import time
-                time.sleep(0.5)
-            else:
-                logger.warning('The system tray needs pystray and Pillow: pip install "pakt[tray]"')
-        except ImportError:
-            logger.warning('The system tray needs pystray and Pillow: pip install "pakt[tray]"')
-        except Exception as e:
-            logger.exception(f"The tray failed to start: {type(e).__name__}: {e}")
-
-    # once the tray is up, the conflict can show as a notification
-    if port_in_use:
-        logger.error(f"Port {port} is already in use; another Pakt instance may be running")
-        if tray_instance and tray_instance._icon:
-            try:
-                tray_instance._icon.notify(
-                    f"Port {port} already in use.\nAnother instance may be running.",
-                    "Pakt"
-                )
-            except Exception as e:
-                logger.warning(f"Tray notification failed: {e}")
-            import time
-            time.sleep(3)
-        return
-
-    logger.info(f"Web UI starting at {local_url}")
-    if not silent_mode:
-        console.print("[dim]Open it in your browser. Press Ctrl+C to stop.[/]\n")
-
-    app = create_app()
-
-    class PaktServer(uvicorn.Server):
-        """Server whose first Ctrl+C cancels a running sync instead of cutting it mid-write."""
-
-        def handle_exit(self, sig, frame) -> None:
-            """Cancel a running sync on the first signal, shut down on the next."""
-            if sync_state["running"] and not sync_state["cancelled"]:
-                sync_state["cancelled"] = True
-                if not silent_mode:
-                    console.print("\n[yellow]Cancelling sync... (Ctrl+C again to quit)[/]")
-                return
-            if not silent_mode:
-                console.print("\n[dim]Shutting down...[/]")
-            super().handle_exit(sig, frame)
-
-    try:
-        uvi_log_level = "critical" if silent_mode else "warning"
-
-        uvi_config = uvicorn.Config(app, host=host, port=port, log_level=uvi_log_level)
-        server = PaktServer(uvi_config)
-
-        if tray_instance and tray_instance._icon:
-            try:
-                tray_instance._icon.notify(f"Running on {local_url}", "Pakt")
-            except Exception as e:
-                logger.warning(f"Tray notification failed: {e}")
-
-        import asyncio
-        asyncio.run(server.serve())
-    except Exception as e:
-        logger.exception(f"Web UI failed: {type(e).__name__}: {e}")
-        raise
-    finally:
-        logger.info("Web UI stopped")
-        if _devnull:
-            _devnull.close()
-        if tray_instance:
-            tray_instance.stop()
+    run_web_ui(host, port, tray is True)
 
 
 @main.command()
