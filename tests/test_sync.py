@@ -3,9 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from pakt import __version__, sync
-from pakt.config import Config
+from pakt import __version__
+from pakt.config import Config, ServerConfig
 from pakt.models import PlexIds, RatedItem, SyncResult, WatchedItem
+from pakt.sync import collection, episodes, match, movies, report, run, watchlist
+from pakt.sync.engine import PushedToTrakt, SyncEngine
+from pakt.trakt import TraktAuthError
 
 
 def plex_movie(imdb: str, watched: bool = False, rating: float | None = None, title: str = "Movie", score: int = 0):
@@ -81,24 +84,24 @@ async def run_movies(trakt, plex, dry_run=False, pushed=None, priority="none") -
     """Run phase 1 against the fakes and return its result."""
     config = Config()
     config.sync.rating_priority = priority
-    engine = sync.SyncEngine(config, trakt, plex, pushed=pushed)
+    engine = SyncEngine(config, trakt, plex, pushed=pushed)
     result = SyncResult()
-    assert await engine._sync_movies(result, dry_run)
+    assert await movies.run(engine, result, dry_run)
     return result
 
 
 def test_id_keys_keep_kinds_apart():
     """A TVDB and a TMDB id with the same number stay distinct keys."""
     ids = PlexIds(plex="1", tvdb=81189, tmdb=81189)
-    assert sync._id_keys(ids, sync.SHOW_ID_TYPES) == [("tvdb", 81189), ("tmdb", 81189)]
-    assert sync._id_keys({"imdb": None, "tmdb": 5}, sync.MOVIE_ID_TYPES) == [("tmdb", 5)]
+    assert match.id_keys(ids, match.SHOW_ID_TYPES) == [("tvdb", 81189), ("tmdb", 81189)]
+    assert match.id_keys({"imdb": None, "tmdb": 5}, match.MOVIE_ID_TYPES) == [("tmdb", 5)]
 
 
 def test_episodes_are_grouped_by_show_and_season():
     """Episode rows nest under one entry per show, seasons in order."""
     rows = [({"ids": {"tvdb": 1}}, 2, {"number": 1}, ""), ({"ids": {"tvdb": 1}}, 1, {"number": 2}, ""),
             ({"ids": {"tvdb": 1}}, 1, {"number": 1}, ""), ({"ids": {"tvdb": 9}}, 1, {"number": 1}, "")]
-    shows = sync._group_by_show(rows)
+    shows = match.group_by_show(rows)
     assert len(shows) == 2
     assert [s["number"] for s in shows[0]["seasons"]] == [1, 2]
     assert [e["number"] for e in shows[0]["seasons"][0]["episodes"]] == [2, 1]
@@ -114,7 +117,7 @@ def test_episodes_are_grouped_by_show_and_season():
 ])
 def test_rating_direction(plex, trakt, priority, expected):
     """A rating flows to the side missing it; a conflict follows the priority setting."""
-    assert sync._rating_direction(plex, trakt, priority, True, True) == expected
+    assert match.rating_direction(plex, trakt, priority, True, True) == expected
 
 
 @pytest.mark.parametrize("trakt, plex, expected", [
@@ -124,40 +127,40 @@ def test_rating_direction(plex, trakt, priority, expected):
 ])
 def test_changes_name_only_what_moved(trakt, plex, expected):
     """A change summary leaves out zero counts and says when nothing changed."""
-    assert sync._changes(trakt, plex) == expected
+    assert report.changes(trakt, plex) == expected
 
 
 @pytest.mark.parametrize("seconds, expected", [(5.43, "5.4s"), (109, "1m49s"), (3600, "60m00s")])
 def test_durations_read_as_seconds_then_minutes(seconds, expected):
     """Durations under a minute show tenths; longer ones show minutes and seconds."""
-    assert sync._duration(seconds) == expected
+    assert report.duration(seconds) == expected
 
 
 def test_trakt_counts_read_as_plain_text():
     """A Trakt response's counts read with singular and plural nouns, and 'nothing' when empty."""
-    assert sync._counted({"movies": 1, "episodes": 3, "shows": 0}) == "1 movie, 3 episodes"
-    assert sync._counted({}) == "nothing"
+    assert report.counted({"movies": 1, "episodes": 3, "shows": 0}) == "1 movie, 3 episodes"
+    assert report.counted({}) == "nothing"
 
 
 def test_watched_index_skips_unwatched_progress_entries():
     """Episodes Trakt lists as not completed are not counted as watched."""
     show = WatchedItem(show={"ids": {"tvdb": 1, "imdb": "tt1"}}, seasons=[{"number": 1, "episodes": [
         {"number": 1, "completed": True}, {"number": 2, "completed": False}]}])
-    index = sync._episode_index([show])
+    index = episodes.episode_index([show])
     assert (("tvdb", 1), 1, 1) in index and (("imdb", "tt1"), 1, 1) in index
     assert (("tvdb", 1), 1, 2) not in index
 
 
-def run_episodes(episodes, watched=frozenset(), ratings=None, pushed=None, cancel=False):
+def run_episodes(plex_episodes, watched=frozenset(), ratings=None, pushed=None, cancel=False):
     """Run the episode worker over one show with TVDB id 1."""
     event = threading.Event()
     if cancel:
         event.set()
     options = {k: True for k in ("watched_plex_to_trakt", "watched_trakt_to_plex",
                                  "ratings_plex_to_trakt", "ratings_trakt_to_plex")}
-    return sync._process_episodes_in_thread(
-        episodes, {"s1": PlexIds(plex="s1", tvdb=1)}, set(watched), ratings or {}, options, "none", event,
-        pushed or sync.PushedToTrakt(),
+    return episodes.process_in_thread(
+        plex_episodes, {"s1": PlexIds(plex="s1", tvdb=1)}, set(watched), ratings or {}, options, "none", event,
+        pushed or PushedToTrakt(),
     )
 
 
@@ -175,7 +178,7 @@ def test_episode_worker_marks_plex_from_trakt():
 
 def test_episode_worker_skips_items_another_server_sent():
     """An episode already sent this run is not queued again."""
-    pushed = sync.PushedToTrakt(watched_episodes={(("tvdb", 1), 1, 1)})
+    pushed = PushedToTrakt(watched_episodes={(("tvdb", 1), 1, 1)})
     assert not run_episodes([plex_episode("s1", 1, 1, watched=True)], pushed=pushed).watched_to_trakt
 
 
@@ -217,14 +220,14 @@ async def test_movie_ratings_follow_priority():
 async def test_dry_run_writes_nothing_but_counts_once():
     """A dry run sends nothing but records the items, which a second server then leaves out."""
     trakt = FakeTrakt()
-    pushed = sync.PushedToTrakt()
+    pushed = PushedToTrakt()
     await run_movies(trakt, FakePlex([plex_movie("tt1", watched=True)]), dry_run=True, pushed=pushed)
     assert trakt.posts == [] and pushed.watched_movies == {("imdb", "tt1")}
 
 
 async def test_failed_phase_does_not_stop_the_next(monkeypatch):
     """An error in one phase is recorded and the later phases still run."""
-    engine = sync.SyncEngine(Config(), FakeTrakt(), FakePlex([]))
+    engine = SyncEngine(Config(), FakeTrakt(), FakePlex([]))
     ran = []
 
     async def boom(*args, **kwargs):
@@ -236,33 +239,33 @@ async def test_failed_phase_does_not_stop_the_next(monkeypatch):
         ran.append(True)
         return True
 
-    monkeypatch.setattr(engine, "_sync_movies", boom)
-    for name in ("_sync_episodes", "_sync_collection", "_sync_watchlist"):
-        monkeypatch.setattr(engine, name, later)
+    monkeypatch.setattr(movies, "run", boom)
+    for phase in (episodes, collection, watchlist):
+        monkeypatch.setattr(phase, "run", later)
     result = await engine.sync()
     assert result and result.errors == ["Movies: RuntimeError: boom"] and len(ran) == 3
 
 
 async def test_auth_errors_stop_the_server(monkeypatch):
     """A refused token is not swallowed by the phase guard."""
-    engine = sync.SyncEngine(Config(), FakeTrakt(), FakePlex([]))
+    engine = SyncEngine(Config(), FakeTrakt(), FakePlex([]))
 
     async def refused(*args, **kwargs):
         """Fail as Trakt does on a dead token."""
-        raise sync.TraktAuthError()
+        raise TraktAuthError()
 
-    monkeypatch.setattr(engine, "_sync_movies", refused)
-    with pytest.raises(sync.TraktAuthError):
+    monkeypatch.setattr(movies, "run", refused)
+    with pytest.raises(TraktAuthError):
         await engine.sync()
 
 
 async def test_second_sync_is_refused_while_one_runs():
     """A sync started while another process holds the lock fails fast."""
     config = Config()
-    config.servers = [sync.ServerConfig(name="s", url="http://192.168.1.5:32400", token="t")]
-    with sync._sync_lock() as held:
+    config.servers = [ServerConfig(name="s", url="http://192.168.1.5:32400", token="t")]
+    with run.sync_lock() as held:
         assert held
-        result = await sync.run_multi_server_sync(config)
+        result = await run.run_multi_server_sync(config)
     assert result.errors == ["Another sync is already running"]
 
 
@@ -280,8 +283,7 @@ def watch_item(kind: str, guid: str, title: str = "Title"):
 def plan(plex, trakt_movies=(), trakt_shows=(), just_watched=frozenset(), to_trakt=True, to_plex=True):
     """Plan the watchlist with both directions on unless told otherwise."""
     options = {"watchlist_plex_to_trakt": to_trakt, "watchlist_trakt_to_plex": to_plex}
-    return sync._plan_watchlist(plex, list(trakt_movies), list(trakt_shows), set(just_watched), options,
-                                lambda: False)
+    return watchlist.plan(plex, list(trakt_movies), list(trakt_shows), set(just_watched), options, lambda: False)
 
 
 def test_watchlist_keeps_movie_and_show_ids_apart():
@@ -332,8 +334,8 @@ async def test_collection_uses_the_best_copy():
     config.sync.collection_plex_to_trakt = True
     trakt = CollectionTrakt()
     plex = FakePlex([plex_movie("tt1"), plex_movie("tt1", score=1)])
-    engine = sync.SyncEngine(config, trakt, plex)
-    assert await engine._sync_collection(SyncResult(), dry_run=False, no_shows=True)
+    engine = SyncEngine(config, trakt, plex)
+    assert await collection.run(engine, SyncResult(), dry_run=False, no_shows=True)
     sent = trakt.posts[0][1]["movies"]
     assert len(sent) == 1 and sent[0]["resolution"] == "uhd_4k"
 
@@ -373,12 +375,12 @@ class UnreachablePlex(ReachablePlex):
 
 async def run_logged(monkeypatch, plex, trakt=TraktSession) -> tuple[SyncResult, list[str]]:
     """Run a sync of a server named Home on the fakes, returning the result and web UI lines."""
-    monkeypatch.setattr(sync, "TraktClient", trakt)
-    monkeypatch.setattr(sync, "PlexClient", plex)
+    monkeypatch.setattr(run, "TraktClient", trakt)
+    monkeypatch.setattr(run, "PlexClient", plex)
     config = Config()
-    config.servers = [sync.ServerConfig(name="Home", url="http://192.168.1.5:32400", token="t")]
+    config.servers = [ServerConfig(name="Home", url="http://192.168.1.5:32400", token="t")]
     lines: list[str] = []
-    result = await sync.run_multi_server_sync(config, log_callback=lines.append, started_by="web UI")
+    result = await run.run_multi_server_sync(config, log_callback=lines.append, started_by="web UI")
     return result, lines
 
 
@@ -388,7 +390,7 @@ async def test_run_opens_with_its_origin_and_closes_with_what_changed(monkeypatc
         """Report two plays sent to Trakt and a rating sent to Plex."""
         return SyncResult(added_to_trakt=2, ratings_to_plex=1)
 
-    monkeypatch.setattr(sync.SyncEngine, "sync", changed)
+    monkeypatch.setattr(SyncEngine, "sync", changed)
     _, lines = await run_logged(monkeypatch, ReachablePlex)
     assert lines[:2] == [f"pakt {__version__} live sync started by web UI: Home", "[Home] Connected over LAN"]
     assert lines[-1].startswith("SUCCESS:Sync finished in ")
@@ -411,7 +413,7 @@ async def test_dead_trakt_token_ends_the_run_with_an_error(monkeypatch):
 
         async def __aenter__(self):
             """Fail as an expired token with a dead refresh token does."""
-            raise sync.TraktAuthError("Trakt refused the refresh token")
+            raise TraktAuthError("Trakt refused the refresh token")
 
     result, lines = await run_logged(monkeypatch, ReachablePlex, trakt=Refused)
     assert result.errors == ["Trakt refused the refresh token"]

@@ -40,7 +40,7 @@ def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_
     """Sync watched status, ratings, collection and watchlist between Plex and Trakt."""
     import asyncio
 
-    from pakt.sync import run_multi_server_sync
+    from pakt.sync.run import run_multi_server_sync
 
     config = Config.load()
 

@@ -21,7 +21,7 @@ from pydantic import BaseModel, Field
 from pakt import __version__
 from pakt.config import Config, ServerConfig, get_config_dir
 from pakt.models import SyncResult
-from pakt.sync import run_multi_server_sync
+from pakt.sync.run import run_multi_server_sync
 from pakt.web.auth import (
     SESSION_COOKIE,
     SESSION_SECONDS,
