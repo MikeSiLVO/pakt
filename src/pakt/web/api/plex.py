@@ -7,12 +7,14 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 
-from pakt.config import Config
+from pakt.config import Config, ServerConfig
 from pakt.web import state
+from pakt.web.api.servers import check_connection, list_libraries
 
 router = APIRouter()
 
 PIN_MAX_AGE = 600  # Plex PINs expire after 10 minutes
+NO_SERVERS = {"status": "error", "message": "No Plex servers configured"}
 
 
 def _cleanup_expired_pins(pins: dict[int, tuple[float, Any]]) -> None:
@@ -23,57 +25,35 @@ def _cleanup_expired_pins(pins: dict[int, tuple[float, Any]]) -> None:
         del pins[pid]
 
 
+def _first_server(config: Config) -> ServerConfig | None:
+    """First enabled server, else the first configured one, or None when there are none."""
+    return next(iter(config.get_enabled_servers() or config.servers), None)
+
+
 @router.post("/api/plex/test")
 def test_plex_connection() -> dict[str, Any]:
     """Test the Plex connection to the first enabled server, else the first server."""
-    from pakt.plex.client import PlexClient
-
     config = Config.load()
-
-    try:
-        if not config.servers:
-            return {"status": "error", "message": "No Plex servers configured"}
-
-        server = config.get_enabled_servers()[0] if config.get_enabled_servers() else config.servers[0]
-        plex = PlexClient(server, account_token=config.plex_token)
-        plex.connect()
-        return {
-            "status": "ok",
-            "server_name": plex.server.friendlyName,
-            "movie_libraries": plex.get_movie_libraries(),
-            "show_libraries": plex.get_show_libraries(),
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    server = _first_server(config)
+    return check_connection(server, config.plex_token) if server else NO_SERVERS
 
 
 @router.get("/api/plex/libraries")
 def get_plex_libraries() -> dict[str, Any]:
     """Get the first enabled server's available libraries and selection, else the first server's."""
-    from pakt.plex.client import PlexClient
-
+    config = Config.load()
+    server = _first_server(config)
+    if not server:
+        return NO_SERVERS
     try:
-        config = Config.load()
-
-        if not config.servers:
-            return {"status": "error", "message": "No Plex servers configured"}
-
-        server = config.get_enabled_servers()[0] if config.get_enabled_servers() else config.servers[0]
-        plex = PlexClient(server, account_token=config.plex_token)
-        plex.connect()
-        return {
-            "status": "ok",
-            "available": {
-                "movie": plex.get_movie_libraries(),
-                "show": plex.get_show_libraries(),
-            },
-            "selected": {
-                "movie": server.movie_libraries,
-                "show": server.show_libraries,
-            },
-        }
+        available = list_libraries(server, config.plex_token)
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    return {
+        "status": "ok",
+        "available": available,
+        "selected": {"movie": server.movie_libraries, "show": server.show_libraries},
+    }
 
 
 @router.post("/api/plex/pin")

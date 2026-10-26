@@ -131,13 +131,13 @@ class PlexClient:
             raise RuntimeError(f"Not connected to Plex server '{self.server_config.name}'")
         return self._server
 
-    def get_movie_libraries(self) -> list[str]:
-        """Get all movie library names."""
-        return [lib.title for lib in self.server.library.sections() if lib.type == "movie"]
-
-    def get_show_libraries(self) -> list[str]:
-        """Get all TV show library names."""
-        return [lib.title for lib in self.server.library.sections() if lib.type == "show"]
+    def get_library_names(self) -> dict[str, list[str]]:
+        """Get movie and show library names from one listing, keyed "movie" and "show"."""
+        names: dict[str, list[str]] = {"movie": [], "show": []}
+        for lib in self.server.library.sections():
+            if lib.type in names:
+                names[lib.type].append(lib.title)
+        return names
 
     def _fetch_sections(
         self, libtype: str, library_names: list[str] | None, episodes: bool = False

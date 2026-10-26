@@ -7,22 +7,13 @@ from typing import Any
 from fastapi import APIRouter
 from pydantic import BaseModel
 
-from pakt.config import Config, ServerConfig
+from pakt.config import Config, ServerConfig, ServerSyncOverrides
 from pakt.web import state
 
 router = APIRouter()
 
-
-class SyncOverrideUpdate(BaseModel):
-    """Per-server sync option overrides, where None falls back to the global setting."""
-
-    watched_plex_to_trakt: bool | None = None
-    watched_trakt_to_plex: bool | None = None
-    ratings_plex_to_trakt: bool | None = None
-    ratings_trakt_to_plex: bool | None = None
-    collection_plex_to_trakt: bool | None = None
-    watchlist_plex_to_trakt: bool | None = None
-    watchlist_trakt_to_plex: bool | None = None
+# the fields the web UI sees; the token stays out
+SERVER_FIELDS = {"name", "server_name", "url", "enabled", "movie_libraries", "show_libraries", "sync"}
 
 
 class ServerUpdate(BaseModel):
@@ -31,7 +22,7 @@ class ServerUpdate(BaseModel):
     enabled: bool | None = None
     movie_libraries: list[str] | None = None
     show_libraries: list[str] | None = None
-    sync: SyncOverrideUpdate | None = None
+    sync: ServerSyncOverrides | None = None
 
 
 class ServerCreate(BaseModel):
@@ -43,45 +34,53 @@ class ServerCreate(BaseModel):
     server_name: str | None = None  # for discovered servers
 
 
+def server_json(server: ServerConfig) -> dict[str, Any]:
+    """Server as the web UI shows it, without its token."""
+    return server.model_dump(include=SERVER_FIELDS)
+
+
+def list_libraries(server: ServerConfig, account_token: str) -> dict[str, list[str]]:
+    """List the server's movie and show libraries, connecting only when none are cached."""
+    from pakt.plex.client import PlexClient
+
+    cache_key = f"plex_libraries_{server.name}"
+    cached = state.get_cached(cache_key)
+    if cached:
+        return cached
+    plex = PlexClient(server, account_token=account_token)
+    plex.connect()
+    libraries = plex.get_library_names()
+    state.set_cached(cache_key, libraries)
+    return libraries
+
+
+def check_connection(server: ServerConfig, account_token: str) -> dict[str, Any]:
+    """Check a fresh connection to the server, reporting its name and libraries or the error."""
+    from pakt.plex.client import PlexClient
+
+    try:
+        plex = PlexClient(server, account_token=account_token)
+        plex.connect()
+        libraries = plex.get_library_names()
+        return {
+            "status": "ok",
+            "server_name": plex.server.friendlyName,
+            "movie_libraries": libraries["movie"],
+            "show_libraries": libraries["show"],
+        }
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
 @router.get("/api/servers")
 async def get_servers() -> dict[str, Any]:
-    """Get configured Plex servers."""
+    """Get configured Plex servers without their tokens, and the global sync settings."""
     config = Config.load()
-    servers = []
-    for s in config.servers:
-        server_data = {
-            "name": s.name,
-            "server_name": s.server_name,
-            "url": s.url,
-            "enabled": s.enabled,
-            "movie_libraries": s.movie_libraries,
-            "show_libraries": s.show_libraries,
-            "sync": None,
-        }
-        if s.sync:
-            server_data["sync"] = {
-                "watched_plex_to_trakt": s.sync.watched_plex_to_trakt,
-                "watched_trakt_to_plex": s.sync.watched_trakt_to_plex,
-                "ratings_plex_to_trakt": s.sync.ratings_plex_to_trakt,
-                "ratings_trakt_to_plex": s.sync.ratings_trakt_to_plex,
-                "collection_plex_to_trakt": s.sync.collection_plex_to_trakt,
-                "watchlist_plex_to_trakt": s.sync.watchlist_plex_to_trakt,
-                "watchlist_trakt_to_plex": s.sync.watchlist_trakt_to_plex,
-            }
-        servers.append(server_data)
     return {
         "status": "ok",
         "has_account_token": bool(config.plex_token),
-        "servers": servers,
-        "global_sync": {
-            "watched_plex_to_trakt": config.sync.watched_plex_to_trakt,
-            "watched_trakt_to_plex": config.sync.watched_trakt_to_plex,
-            "ratings_plex_to_trakt": config.sync.ratings_plex_to_trakt,
-            "ratings_trakt_to_plex": config.sync.ratings_trakt_to_plex,
-            "collection_plex_to_trakt": config.sync.collection_plex_to_trakt,
-            "watchlist_plex_to_trakt": config.sync.watchlist_plex_to_trakt,
-            "watchlist_trakt_to_plex": config.sync.watchlist_trakt_to_plex,
-        },
+        "servers": [server_json(s) for s in config.servers],
+        "global_sync": config.sync.model_dump(exclude={"rating_priority"}),
     }
 
 
@@ -133,9 +132,7 @@ async def add_server(request: ServerCreate) -> dict[str, Any]:
 
 @router.put("/api/servers/{name}")
 async def update_server(name: str, request: ServerUpdate) -> dict[str, Any]:
-    """Update a server's enabled flag, libraries and sync overrides."""
-    from pakt.config import ServerSyncOverrides
-
+    """Update a server's enabled flag, libraries and sync overrides; a None override clears it."""
     config = Config.load()
     server = config.get_server(name)
 
@@ -149,17 +146,7 @@ async def update_server(name: str, request: ServerUpdate) -> dict[str, Any]:
     if request.show_libraries is not None:
         server.show_libraries = request.show_libraries
     if request.sync is not None:
-        if server.sync is None:
-            server.sync = ServerSyncOverrides()
-        for field in [
-            "watched_plex_to_trakt", "watched_trakt_to_plex",
-            "ratings_plex_to_trakt", "ratings_trakt_to_plex",
-            "collection_plex_to_trakt",
-            "watchlist_plex_to_trakt", "watchlist_trakt_to_plex",
-        ]:
-            val = getattr(request.sync, field, None)
-            # None clears the override back to the global setting
-            setattr(server.sync, field, val)
+        server.sync = request.sync
 
     config.save()
     state.invalidate_config_cache()
@@ -183,67 +170,27 @@ async def delete_server(name: str) -> dict[str, Any]:
 @router.post("/api/servers/{name}/test")
 def test_server(name: str) -> dict[str, Any]:
     """Test connection to a specific server."""
-    from pakt.plex.client import PlexClient
-
     config = Config.load()
     server = config.get_server(name)
-
     if not server:
         return {"status": "error", "message": f"Server '{name}' not found"}
-
-    try:
-        plex = PlexClient(server, account_token=config.plex_token)
-        plex.connect()
-        return {
-            "status": "ok",
-            "server_name": plex.server.friendlyName,
-            "movie_libraries": plex.get_movie_libraries(),
-            "show_libraries": plex.get_show_libraries(),
-        }
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+    return check_connection(server, config.plex_token)
 
 
 @router.get("/api/servers/{name}/libraries")
 def get_server_libraries(name: str) -> dict[str, Any]:
     """Get a server's available libraries and the ones selected to sync."""
-    from pakt.plex.client import PlexClient
-
     config = Config.load()
     server = config.get_server(name)
-
     if not server:
         return {"status": "error", "message": f"Server '{name}' not found"}
 
-    # only the available list is cached; the selection always comes from config
-    cache_key = f"plex_libraries_{name}"
-    cached_available = state.get_cached(cache_key)
-
-    if cached_available:
-        return {
-            "status": "ok",
-            "available": cached_available,
-            "selected": {
-                "movie": server.movie_libraries,
-                "show": server.show_libraries,
-            },
-        }
-
     try:
-        plex = PlexClient(server, account_token=config.plex_token)
-        plex.connect()
-        available = {
-            "movie": plex.get_movie_libraries(),
-            "show": plex.get_show_libraries(),
-        }
-        state.set_cached(cache_key, available)
-        return {
-            "status": "ok",
-            "available": available,
-            "selected": {
-                "movie": server.movie_libraries,
-                "show": server.show_libraries,
-            },
-        }
+        available = list_libraries(server, config.plex_token)
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    return {
+        "status": "ok",
+        "available": available,
+        "selected": {"movie": server.movie_libraries, "show": server.show_libraries},
+    }

@@ -96,8 +96,8 @@ def setup_plex_manual(config: Config) -> None:
         plex = PlexClient(server_config)
         plex.connect()
         console.print(f"[green]✓[/] Connected to: {plex.server.friendlyName}")
-        libs = plex.get_movie_libraries() + plex.get_show_libraries()
-        console.print(f"[green]✓[/] Libraries: {', '.join(libs)}")
+        libraries = plex.get_library_names()
+        console.print(f"[green]✓[/] Libraries: {', '.join(libraries['movie'] + libraries['show'])}")
 
         config.plex_token = plex_token
         config.servers = [s for s in config.servers if s.name != server_config.name] + [server_config]

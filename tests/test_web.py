@@ -2,7 +2,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from pakt import trakt
-from pakt.config import Config
+from pakt.config import Config, ServerConfig
 from pakt.web import app as web_app
 from pakt.web import state
 from pakt.web.auth import MAX_FAILURES, hash_password
@@ -213,6 +213,40 @@ def test_poll_without_a_login_in_progress_fails():
 def test_plex_pin_check_is_post_only():
     """Checking a Plex PIN, which can save a token, needs a POST."""
     assert local_client().get("/api/plex/pin/1").status_code == 405
+
+
+def add_server_config(name: str = "Home") -> None:
+    """Add one server with a token, the way setup leaves it."""
+    config = Config.load()
+    config.servers = [ServerConfig(name=name, url="http://192.168.1.5:32400", token="SECRET")]
+    config.save()
+
+
+def test_server_list_never_carries_tokens():
+    """The servers list shows each server's settings but not its token."""
+    add_server_config()
+    servers = local_client().get("/api/servers").json()["servers"]
+    assert servers[0]["name"] == "Home" and "token" not in servers[0]
+    assert "SECRET" not in local_client().get("/api/servers").text
+
+
+def test_server_overrides_are_set_and_cleared():
+    """Overrides sent for a server replace its old ones; a null falls back to the global setting."""
+    add_server_config()
+    client = local_client()
+    client.put("/api/servers/Home", json={"sync": {"watched_plex_to_trakt": False}})
+    assert Config.load().servers[0].sync.watched_plex_to_trakt is False
+    client.put("/api/servers/Home", json={"sync": {"watched_plex_to_trakt": None}})
+    assert Config.load().servers[0].sync.watched_plex_to_trakt is None
+
+
+def test_config_update_applies_sync_settings_and_rejects_bad_ones():
+    """Sent sync settings change and the rest stay; an unknown rating priority is refused."""
+    client = local_client()
+    client.post("/api/config", json={"watched_plex_to_trakt": False, "rating_priority": "trakt"})
+    sync = Config.load().sync
+    assert sync.watched_plex_to_trakt is False and sync.rating_priority == "trakt" and sync.watched_trakt_to_plex
+    assert client.post("/api/config", json={"rating_priority": "bogus"}).status_code == 422
 
 
 def test_trakt_client_id_cannot_be_changed_over_the_api():

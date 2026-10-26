@@ -75,33 +75,36 @@ async def logout_trakt() -> dict[str, Any]:
     return {"status": "ok", "revoked": success}
 
 
-@router.get("/api/trakt/account")
-async def get_trakt_account() -> dict[str, Any]:
-    """Get Trakt account info including VIP status and limits."""
+async def account_status(config: Config) -> dict[str, Any]:
+    """Get the Trakt account's VIP status and limits, cached for five minutes, or the error."""
     from pakt.trakt import TraktClient
 
     cached = state.get_cached("trakt_account")
     if cached:
         return cached
-
-    config = Config.load()
-    if not config.trakt.access_token:
-        return {"status": "error", "message": "Not authenticated"}
-
     try:
         async with TraktClient(config.trakt, on_token_refresh=state.token_saver(config)) as client:
             limits = await client.get_account_limits()
-            result = {
-                "status": "ok",
-                "is_vip": limits.is_vip,
-                "limits": {
-                    "collection": limits.collection_limit,
-                    "watchlist": limits.watchlist_limit,
-                    "lists": limits.list_limit,
-                    "list_items": limits.list_item_limit,
-                },
-            }
-            state.set_cached("trakt_account", result)
-            return result
     except Exception as e:
         return {"status": "error", "message": str(e)}
+    result = {
+        "status": "ok",
+        "is_vip": limits.is_vip,
+        "limits": {
+            "collection": limits.collection_limit,
+            "watchlist": limits.watchlist_limit,
+            "lists": limits.list_limit,
+            "list_items": limits.list_item_limit,
+        },
+    }
+    state.set_cached("trakt_account", result)
+    return result
+
+
+@router.get("/api/trakt/account")
+async def get_trakt_account() -> dict[str, Any]:
+    """Get Trakt account info including VIP status and limits."""
+    config = Config.load()
+    if not config.trakt.access_token:
+        return {"status": "error", "message": "Not authenticated"}
+    return await account_status(config)

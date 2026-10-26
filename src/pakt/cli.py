@@ -268,8 +268,8 @@ def libraries(server: str | None, movie: tuple[str, ...], show: tuple[str, ...],
         console.print(f"[red]Error connecting to Plex:[/] {e}")
         return
 
-    available_movie_libs = plex.get_movie_libraries()
-    available_show_libs = plex.get_show_libraries()
+    available = plex.get_library_names()
+    available_movie_libs, available_show_libs = available["movie"], available["show"]
 
     if movie or show or sync_all:
         if sync_all:
@@ -500,10 +500,9 @@ def servers_test(name: str):
         plex.connect()
         console.print(f"[green]✓[/] Connected to: {plex.server.friendlyName}")
 
-        movie_libs = plex.get_movie_libraries()
-        show_libs = plex.get_show_libraries()
-        console.print(f"[green]✓[/] Movie libraries: {', '.join(movie_libs) or 'none'}")
-        console.print(f"[green]✓[/] Show libraries: {', '.join(show_libs) or 'none'}")
+        libraries = plex.get_library_names()
+        console.print(f"[green]✓[/] Movie libraries: {', '.join(libraries['movie']) or 'none'}")
+        console.print(f"[green]✓[/] Show libraries: {', '.join(libraries['show']) or 'none'}")
     except Exception as e:
         console.print(f"[red]✗ Connection failed:[/] {e}")
 
