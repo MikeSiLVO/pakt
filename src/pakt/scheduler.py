@@ -35,18 +35,16 @@ class SyncScheduler:
     def start(self) -> None:
         """Start the scheduler if config enables it with a positive interval."""
         if not self.config.scheduler.enabled:
-            logger.info("Scheduler disabled in config")
+            logger.info("Scheduler off")
             return
 
         if self.config.scheduler.interval_hours <= 0:
-            logger.warning("Scheduler interval must be > 0, scheduler disabled")
+            logger.warning("Scheduler off: its interval must be at least 1 hour")
             return
 
         self._add_job()
         self.scheduler.start()
-        logger.info(
-            f"Scheduler started with {self.config.scheduler.interval_hours}h interval"
-        )
+        self._log_on()
 
     def stop(self) -> None:
         """Stop the scheduler."""
@@ -84,14 +82,13 @@ class SyncScheduler:
     async def _run_sync(self) -> None:
         """Run the sync unless one is already running, logging a failure instead of raising."""
         if self.is_running_func():
-            logger.info("Scheduled sync skipped - sync already running")
+            logger.info("Scheduled sync skipped, a sync is already running")
             return
 
-        logger.info("Starting scheduled sync")
         try:
             await self.sync_func()
         except Exception as e:
-            logger.error(f"Scheduled sync failed: {e}")
+            logger.exception(f"Scheduled sync failed: {type(e).__name__}: {e}")
 
     def update_config(self, enabled: bool, interval_hours: int) -> None:
         """Update scheduler configuration, dropping the job when disabled or the interval is bad."""
@@ -101,14 +98,14 @@ class SyncScheduler:
         if not enabled:
             if self.scheduler.get_job(self._job_id):
                 self.scheduler.remove_job(self._job_id)
-            logger.info("Scheduler disabled")
+            logger.info("Scheduler off")
             return
 
         if interval_hours <= 0:
             # a leftover job would keep firing while config and UI report the scheduler off
             if self.scheduler.get_job(self._job_id):
                 self.scheduler.remove_job(self._job_id)
-            logger.warning("Invalid interval, scheduler disabled")
+            logger.warning("Scheduler off: its interval must be at least 1 hour")
             return
 
         if not self.scheduler.running:
@@ -117,7 +114,13 @@ class SyncScheduler:
         else:
             self._add_job()
 
-        logger.info(f"Scheduler updated: {interval_hours}h interval")
+        self._log_on()
+
+    def _log_on(self) -> None:
+        """Log that the scheduler is on, with its interval and when the next sync is due."""
+        next_run = self.next_run
+        due = f", next sync {next_run.astimezone():%Y-%m-%d %H:%M}" if next_run else ""
+        logger.info(f"Scheduler on: every {self.config.scheduler.interval_hours}h{due}")
 
     @property
     def next_run(self) -> datetime | None:

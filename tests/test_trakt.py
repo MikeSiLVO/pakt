@@ -1,4 +1,5 @@
 import json
+import logging
 import time
 import types
 
@@ -108,11 +109,13 @@ async def test_rate_limit_gives_up_after_three_tries(sleeps):
         await api_client(lambda r: httpx.Response(429))._request("GET", "/x")
 
 
-async def test_server_errors_retry_then_raise(sleeps):
-    """Overload and Cloudflare errors are retried, then raised."""
+async def test_server_errors_retry_then_raise(sleeps, caplog):
+    """Overload and Cloudflare errors are retried with a warning in the log, then raised."""
     with pytest.raises(httpx.HTTPStatusError):
         await api_client(lambda r: httpx.Response(522))._request("GET", "/x")
     assert len(sleeps) == 2
+    warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 2 and warnings[0].startswith("Trakt HTTP 522 on GET /x, retrying in")
 
 
 @pytest.mark.parametrize("status, headers, error, text", [
@@ -168,8 +171,8 @@ def refreshable(hours_left: float, saved: list) -> trakt.TraktClient:
     return trakt.TraktClient(config, on_token_refresh=saved.append)
 
 
-async def test_refresh_saves_the_rotated_token(auth_requests):
-    """A good refresh updates the client and hands the new token to the callback."""
+async def test_refresh_saves_the_rotated_token(auth_requests, caplog):
+    """A good refresh updates the client, hands the new token to the callback and logs it."""
     seen, replies = auth_requests
     token = {"access_token": "new", "refresh_token": "r2", "created_at": 1, "expires_in": 2}
     replies.append(httpx.Response(200, json=token))
@@ -177,17 +180,19 @@ async def test_refresh_saves_the_rotated_token(auth_requests):
     client = refreshable(10, saved)
     await client._ensure_valid_token()
     assert client.config.access_token == "new" and saved == [token]
+    assert "Trakt token refreshed" in caplog.messages
     body = json.loads(seen[0].content)
     assert seen[0].url.host == "auth.trakt.tv" and "client_secret" not in body
 
 
-async def test_refused_refresh_keeps_a_working_token(auth_requests):
-    """A refused refresh keeps using the current token while it still has time left."""
+async def test_refused_refresh_keeps_a_working_token(auth_requests, caplog):
+    """A refused refresh keeps the current token while it has time left, and warns how long."""
     _, replies = auth_requests
     replies.append(httpx.Response(400, json={"error": "invalid_grant", "error_description": "session not found"}))
     client = refreshable(10, [])
     await client._ensure_valid_token()
     assert client.config.access_token == "old"
+    assert any("session not found" in m and "still works for 10h" in m for m in caplog.messages)
 
 
 async def test_refused_refresh_of_an_expired_token_raises(auth_requests):

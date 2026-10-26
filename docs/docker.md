@@ -215,9 +215,9 @@ View container logs:
 docker-compose logs -f pakt
 ```
 
-For debug logs, check the config volume:
+The same lines, from every run, are in `sync.log` on the config volume:
 ```bash
-docker-compose run --rm pakt cat /home/pakt/.config/pakt/debug.log
+docker-compose run --rm pakt cat /home/pakt/.config/pakt/sync.log
 ```
 
 ---

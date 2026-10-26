@@ -88,10 +88,8 @@ Create `~/Library/LaunchAgents/com.pakt.sync.plist`:
         <key>Minute</key>
         <integer>0</integer>
     </dict>
-    <key>StandardOutPath</key>
-    <string>/tmp/pakt-sync.log</string>
     <key>StandardErrorPath</key>
-    <string>/tmp/pakt-sync.log</string>
+    <string>/tmp/pakt-error.log</string>
 </dict>
 </plist>
 ```
@@ -172,13 +170,14 @@ crontab -e
 
 Add (runs daily at 6 AM):
 ```
-0 6 * * * /usr/local/bin/pakt sync >> /tmp/pakt-sync.log 2>&1
+0 6 * * * /usr/local/bin/pakt sync > /dev/null
 ```
 
 Adjust the path to `pakt` based on your installation (`which pakt`).
 
 `pakt sync` exits with status 1 when a server or sync phase fails, so cron and service managers can
-report it.
+report it. Each run is logged to `sync.log` in the config folder, see
+[Logs](https://github.com/MikeSiLVO/Pakt/blob/main/docs/troubleshooting.md#logs).
 
 ## Built-in Scheduler
 

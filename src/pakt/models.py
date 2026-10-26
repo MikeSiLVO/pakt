@@ -23,7 +23,8 @@ class SyncResult(BaseModel):
 
     added_to_trakt: int = 0
     added_to_plex: int = 0
-    ratings_synced: int = 0
+    ratings_to_trakt: int = 0
+    ratings_to_plex: int = 0
     collection_added: int = 0
     collection_updated: int = 0
     watchlist_added_trakt: int = 0

@@ -1640,24 +1640,6 @@
                     hideProgress();
                     resetSyncButtons();
                     loadStatus();
-
-                    if (data.last_result) {
-                        if (data.last_result.cancelled) {
-                            // the WARNING line already logged it
-                        } else if (data.last_result.error) {
-                            logToConsole(data.last_result.error, 'error');
-                        } else {
-                            logToConsole('Sync complete!', 'success');
-                            addConsoleDetail(`Added to Trakt: ${data.last_result.added_to_trakt}`);
-                            addConsoleDetail(`Added to Plex: ${data.last_result.added_to_plex}`);
-                            addConsoleDetail(`Ratings synced: ${data.last_result.ratings_synced}`);
-                            addConsoleDetail(`Duration: ${data.last_result.duration?.toFixed(1)}s`);
-                            if (data.last_result.errors && data.last_result.errors.length > 0) {
-                                logToConsole(`${data.last_result.errors.length} errors occurred`, 'warning');
-                                data.last_result.errors.forEach(e => addConsoleDetail(`Error: ${e}`));
-                            }
-                        }
-                    }
                 }
                 } catch (e) {
                     console.error('Poll error:', e);

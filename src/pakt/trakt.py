@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 import time
 from dataclasses import dataclass
@@ -10,13 +11,12 @@ from enum import Enum
 from typing import Any, Callable
 
 import httpx
-from rich.console import Console
 
 from pakt import __version__
 from pakt.config import TraktConfig
 from pakt.models import RatedItem, WatchedItem
 
-console = Console()
+logger = logging.getLogger(__name__)
 
 TRAKT_API_URL = "https://api.trakt.tv"
 TRAKT_AUTH_URL = "https://auth.trakt.tv"
@@ -167,7 +167,6 @@ class TraktClient:
         if not self._token_needs_refresh():
             return
 
-        console.print("[cyan]Refreshing Trakt access token...[/]")
         try:
             token = await self.refresh_access_token()
             self.config.access_token = token["access_token"]
@@ -180,16 +179,14 @@ class TraktClient:
             if self._on_token_refresh:
                 self._on_token_refresh(token)
 
-            console.print("[green]Token refreshed successfully[/]")
+            logger.info("Trakt token refreshed")
         except TraktAuthError as e:
             hours_left = (self.config.expires_at - time.time()) / 3600
             if hours_left <= 0:
-                console.print(f"[red]{e}[/]")
                 raise
-            console.print(f"[yellow]{e} The current token still works for {hours_left:.0f}h.[/]")
+            logger.warning(f"{e} The current token still works for {hours_left:.0f}h.")
         except Exception as e:
-            console.print(f"[yellow]Token refresh failed: {e}[/]")
-            console.print("[yellow]Continuing with existing token...[/]")
+            logger.warning(f"Trakt token refresh failed, using the current token: {type(e).__name__}: {e}")
 
     @property
     def _headers(self) -> dict[str, str]:
@@ -233,13 +230,13 @@ class TraktClient:
             try:
                 response = await self._client.request(method, path, **kwargs)
             except httpx.TransportError as e:
-                # Timeouts and dropped connections; pagination makes these routine
+                # pagination makes timeouts and dropped connections routine
                 if attempt == retries - 1:
                     raise
                 wait = _retry_delay(None, attempt)
-                console.print(
-                    f"[yellow]Trakt connection error ({type(e).__name__}), retrying in {wait:.0f}s "
-                    f"(attempt {attempt + 1}/{retries})[/]"
+                logger.warning(
+                    f"Trakt connection error on {method} {path} ({type(e).__name__}), retrying in {wait:.0f}s "
+                    f"(attempt {attempt + 1} of {retries})"
                 )
                 await asyncio.sleep(wait)
                 continue
@@ -247,15 +244,15 @@ class TraktClient:
             status = response.status_code
             if status in RETRY_STATUSES:
                 wait = _retry_delay(response, attempt)
-                if status == 429:
-                    bucket = response.headers.get("X-Ratelimit", "no X-Ratelimit header")
-                    console.print(f"[yellow]Trakt rate limit on {method} {path}: {bucket}[/]")
                 if attempt == retries - 1:
                     if status == 429:
                         raise TraktRateLimitError(int(wait))
                     response.raise_for_status()
-                console.print(
-                    f"[yellow]Trakt {status}, retrying in {wait:.0f}s (attempt {attempt + 1}/{retries})[/]"
+                reason = "rate limit" if status == 429 else f"HTTP {status}"
+                bucket = f", {response.headers['X-Ratelimit']}" if "X-Ratelimit" in response.headers else ""
+                logger.warning(
+                    f"Trakt {reason} on {method} {path}{bucket}, retrying in {wait:.0f}s "
+                    f"(attempt {attempt + 1} of {retries})"
                 )
                 await asyncio.sleep(wait)
                 continue
@@ -503,14 +500,13 @@ class TraktClient:
                 return token
 
             except TraktAuthError:
-                # don't retry auth errors; they won't succeed
                 raise
             except (httpx.ConnectError, httpx.ReadError, httpx.WriteError, httpx.TimeoutException) as e:
                 last_error = e
                 if attempt < retries - 1:
                     wait = backoff[attempt]
-                    console.print(f"[yellow]Token refresh failed (attempt {attempt + 1}/{retries}), "
-                                  f"retrying in {wait}s...[/]")
+                    logger.warning(f"Trakt token refresh failed ({type(e).__name__}), retrying in {wait}s "
+                                   f"(attempt {attempt + 1} of {retries})")
                     await asyncio.sleep(wait)
 
         raise last_error or Exception("Token refresh failed after retries")

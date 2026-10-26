@@ -156,7 +156,7 @@ pip install pystray Pillow
 
 Check for existing instance:
 - Look in Task Manager for `pythonw.exe` or `python.exe` processes
-- Check `debug.log` in config directory
+- Check `sync.log` in the config folder for a line saying the port is already in use
 
 ---
 
@@ -301,18 +301,22 @@ The scheduler only runs while `pakt serve` is running. For persistent scheduling
 
 ---
 
-## Debug Logs
+## Logs
 
-Every sync writes to `sync.log` in the config folder. It rolls over to `sync.log.1` at 5 MB.
+Pakt writes everything to `sync.log` in the config folder: syncs started from the CLI, the web UI or
+the scheduler, and the web UI and tray themselves. It rolls over to `sync.log.1` at 5 MB.
 
-When running in tray mode (`pythonw -m pakt serve --tray`), logs are written to:
+Each line has the time, the level (`INFO`, `WARNING` or `ERROR`) and, while a server syncs, its name:
 
-- **Windows:** `%APPDATA%\pakt\debug.log`
-- **Linux/macOS:** `~/.config/pakt/debug.log`
+```
+2026-10-27 06:00:01 INFO    pakt 0.5.1 live sync started by CLI: Home
+2026-10-27 06:00:07 INFO    [Home] Movies: Trakt +2 watched; Plex +1 rated (7.1s)
+2026-10-27 06:00:52 WARNING [Home] Episodes: skipped 8 episodes whose show has no IMDb, TMDB or TVDB ID
+2026-10-27 06:01:49 INFO    Sync finished in 1m49s, 1 of 1 server: Trakt +2 watched; Plex +1 rated
+```
 
-Additional files:
-- `debug.log.1` - Previous session
-- `debug.conflict.log` - Port conflict attempts
+The last line of each run says how it went. `--verbose` adds the items behind each count, indented
+under the line they belong to.
 
 ---
 
@@ -321,7 +325,7 @@ Additional files:
 If you're still stuck:
 
 1. Run `pakt sync --verbose --dry-run` and check output
-2. Check `debug.log` for errors
+2. Check `sync.log` for `WARNING` and `ERROR` lines
 3. [Open an issue](https://github.com/MikeSiLVO/Pakt/issues) with:
    - Pakt version (`pakt --version`)
    - OS and Python version

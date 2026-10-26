@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 import os
 import time
 from contextlib import asynccontextmanager
@@ -19,6 +20,7 @@ from pydantic import BaseModel, Field
 
 from pakt import __version__
 from pakt.config import Config, ServerConfig, get_config_dir
+from pakt.models import SyncResult
 from pakt.sync import run_multi_server_sync
 from pakt.web.auth import (
     SESSION_COOKIE,
@@ -29,6 +31,8 @@ from pakt.web.auth import (
     make_session,
     session_valid,
 )
+
+logger = logging.getLogger(__name__)
 
 PUBLIC_PATHS = ("/login", "/favicon.ico", "/assets/")
 MAX_LOGIN_BODY = 4096
@@ -88,6 +92,21 @@ def _token_saver(config: Config) -> Callable[[dict], None]:
         config.save_trakt_token(token)
         invalidate_config_cache()
     return save
+
+
+def _last_result(result: SyncResult) -> dict[str, Any]:
+    """Build the status card's counts from a finished sync, ratings both ways counted together."""
+    return {
+        "added_to_trakt": result.added_to_trakt,
+        "added_to_plex": result.added_to_plex,
+        "ratings_synced": result.ratings_to_trakt + result.ratings_to_plex,
+        "collection_added": result.collection_added,
+        "collection_updated": result.collection_updated,
+        "watchlist_added_trakt": result.watchlist_added_trakt,
+        "watchlist_added_plex": result.watchlist_added_plex,
+        "duration": result.duration_seconds,
+        "errors": result.errors[:10],
+    }
 
 
 def _host_allowed(host: str, allowed_hosts: list[str]) -> bool:
@@ -173,7 +192,7 @@ async def _scheduled_sync() -> None:
 
     sync_state["running"] = True
     sync_state["cancelled"] = False
-    sync_state["logs"] = ["Scheduled sync started"]
+    sync_state["logs"] = []
 
     try:
         config = Config.load()
@@ -183,22 +202,13 @@ async def _scheduled_sync() -> None:
             on_token_refresh=_token_saver(config),
             log_callback=lambda msg: sync_state["logs"].append(msg),
             cancel_check=lambda: sync_state["cancelled"],
+            started_by="scheduler",
         )
-
-        sync_state["last_result"] = {
-            "added_to_trakt": result.added_to_trakt,
-            "added_to_plex": result.added_to_plex,
-            "ratings_synced": result.ratings_synced,
-            "collection_added": result.collection_added,
-            "collection_updated": result.collection_updated,
-            "watchlist_added_trakt": result.watchlist_added_trakt,
-            "watchlist_added_plex": result.watchlist_added_plex,
-            "duration": result.duration_seconds,
-            "errors": result.errors[:10],
-        }
+        sync_state["last_result"] = _last_result(result)
         sync_state["last_run"] = datetime.now().isoformat()
     except Exception as e:
-        sync_state["logs"].append(f"ERROR:{str(e)}")
+        logger.exception(f"Scheduled sync failed: {type(e).__name__}: {e}")
+        sync_state["logs"].append(f"ERROR:{e}")
         sync_state["last_result"] = {"error": str(e)}
     finally:
         sync_state["running"] = False
@@ -568,21 +578,6 @@ def create_app() -> FastAPI:
             """Run the sync in the background and mirror its outcome into sync_state."""
             try:
                 config = Config.load()
-
-                def on_token_refresh(token: dict):
-                    """Persist rotated Trakt tokens and note the refresh in the sync log."""
-                    config.save_trakt_token(token)
-                    invalidate_config_cache()
-                    log("Token refreshed")
-
-                log("Loading configuration...")
-                w_p2t = config.sync.watched_plex_to_trakt
-                w_t2p = config.sync.watched_trakt_to_plex
-                log(f"Sync options: Plex→Trakt watched={w_p2t}, Trakt→Plex watched={w_t2p}")
-                r_p2t = config.sync.ratings_plex_to_trakt
-                r_t2p = config.sync.ratings_trakt_to_plex
-                log(f"Sync options: Plex→Trakt ratings={r_p2t}, Trakt→Plex ratings={r_t2p}")
-
                 result = await run_multi_server_sync(
                     config,
                     server_names=request.servers,
@@ -592,41 +587,20 @@ def create_app() -> FastAPI:
                     collection_only=request.collection_only,
                     no_movies=request.no_movies,
                     no_shows=request.no_shows,
-                    on_token_refresh=on_token_refresh,
+                    on_token_refresh=_token_saver(config),
                     log_callback=log,
                     cancel_check=is_cancelled,
+                    started_by="web UI",
                 )
 
                 if sync_state["cancelled"]:
-                    log("WARNING:Sync cancelled")
                     sync_state["last_result"] = {"cancelled": True}
                 else:
-                    log("SUCCESS:Sync complete!")
-                    log(f"DETAIL:Watched - Added to Trakt: {result.added_to_trakt}")
-                    log(f"DETAIL:Watched - Added to Plex: {result.added_to_plex}")
-                    log(f"DETAIL:Ratings synced: {result.ratings_synced}")
-                    if result.collection_added or result.collection_updated:
-                        log(f"DETAIL:Collection added: {result.collection_added}, updated: {result.collection_updated}")
-                    if result.watchlist_added_trakt or result.watchlist_added_plex:
-                        wl_trakt = result.watchlist_added_trakt
-                        wl_plex = result.watchlist_added_plex
-                        log(f"DETAIL:Watchlist - Added to Trakt: {wl_trakt}, Plex: {wl_plex}")
-                    log(f"DETAIL:Duration: {result.duration_seconds:.1f}s")
-
-                    sync_state["last_result"] = {
-                        "added_to_trakt": result.added_to_trakt,
-                        "added_to_plex": result.added_to_plex,
-                        "ratings_synced": result.ratings_synced,
-                        "collection_added": result.collection_added,
-                        "collection_updated": result.collection_updated,
-                        "watchlist_added_trakt": result.watchlist_added_trakt,
-                        "watchlist_added_plex": result.watchlist_added_plex,
-                        "duration": result.duration_seconds,
-                        "errors": result.errors[:10],
-                    }
+                    sync_state["last_result"] = _last_result(result)
                     sync_state["last_run"] = datetime.now().isoformat()
             except Exception as e:
-                log(f"ERROR:{str(e)}")
+                logger.exception(f"Sync failed: {type(e).__name__}: {e}")
+                log(f"ERROR:{e}")
                 sync_state["last_result"] = {"error": str(e)}
             finally:
                 sync_state["running"] = False

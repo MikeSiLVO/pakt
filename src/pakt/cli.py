@@ -2,26 +2,28 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 import time
 
 import click
 from rich.console import Console
-from rich.markup import escape
 from rich.table import Table
 
 from pakt import __version__
 from pakt.config import Config, ServerConfig, get_config_dir
+from pakt.log import setup_logging
 
 console = Console()
+logger = logging.getLogger(__name__)
 
 
 @click.group()
 @click.version_option(version=__version__, prog_name="pakt")
 def main():
     """Pakt: fast Plex-Trakt sync using batch operations."""
-    pass
+    setup_logging()
 
 
 @main.command()
@@ -43,11 +45,11 @@ def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_
     config = Config.load()
 
     if not config.trakt.access_token:
-        console.print("[red]Error:[/] Not logged in to Trakt. Run 'pakt login' first.")
+        logger.error("Not logged in to Trakt. Run 'pakt login' first.")
         sys.exit(1)
 
     if not config.servers:
-        console.print("[red]Error:[/] No Plex servers configured. Run 'pakt setup' first.")
+        logger.error("No Plex servers configured. Run 'pakt setup' first.")
         sys.exit(1)
 
     server_names = list(servers) if servers else None
@@ -62,20 +64,7 @@ def sync(dry_run: bool, verbose: bool, servers: tuple[str, ...], fix_collection_
         no_shows=no_shows,
         on_token_refresh=config.save_trakt_token,
     ))
-
-    title = "[bold yellow]Sync finished with errors[/]" if result.errors else "[bold green]Sync complete![/]"
-    console.print(f"\n{title}")
-    console.print(f"  Added to Trakt: {result.added_to_trakt}")
-    console.print(f"  Added to Plex: {result.added_to_plex}")
-    console.print(f"  Ratings synced: {result.ratings_synced}")
-    if result.collection_added or result.collection_updated:
-        console.print(f"  Collection added: {result.collection_added}, updated: {result.collection_updated}")
-    console.print(f"  Duration: {result.duration_seconds:.1f}s")
-
     if result.errors:
-        console.print(f"\n[yellow]Errors ({len(result.errors)}):[/]")
-        for error in result.errors[:10]:
-            console.print(f"  - {escape(error)}")
         sys.exit(1)
 
 
@@ -438,7 +427,6 @@ def serve(host: str | None, port: int | None, tray: bool | None):
     # pythonw has no console
     silent_mode = tray is True
 
-    # check before rotating debug.log, which a running instance still writes
     import socket
     port_in_use = False
     sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -448,40 +436,6 @@ def serve(host: str | None, port: int | None, tray: bool | None):
     except OSError:
         port_in_use = True
 
-    debug_log = None
-    def log(msg: str) -> None:
-        """No-op stand-in used when debug logging is off."""
-
-    if silent_mode:
-        try:
-            from datetime import datetime
-            log_path = get_config_dir() / "debug.log"
-            old_log_path = get_config_dir() / "debug.log.1"
-
-            if port_in_use:
-                conflict_log = get_config_dir() / "debug.conflict.log"
-                debug_log = open(conflict_log, "w")
-            else:
-                if log_path.exists():
-                    if old_log_path.exists():
-                        old_log_path.unlink()
-                    log_path.rename(old_log_path)
-                debug_log = open(log_path, "w")
-
-            def log(msg: str) -> None:
-                """Write to the debug file; pythonw has no console to fall back on."""
-                if debug_log:
-                    debug_log.write(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n")
-                    debug_log.flush()
-
-            if port_in_use:
-                log(f"Instance start blocked - port {port} in use")
-            else:
-                log(f"serve() started (host={host}, port={port})")
-        except Exception:
-            pass
-
-    # never closed: stdout and stderr write to it until exit
     _devnull = None
     if silent_mode:
         try:
@@ -494,18 +448,14 @@ def serve(host: str | None, port: int | None, tray: bool | None):
     tray_instance = None
     if show_tray:
         try:
-            if not port_in_use:
-                log("Importing tray module")
             from pakt.tray import TRAY_AVAILABLE, PaktTray
 
             if TRAY_AVAILABLE:
-                if not port_in_use:
-                    log("Creating PaktTray instance")
                 web_url = local_url
 
                 def on_exit():
                     """Hard exit from the tray menu; uvicorn is on another thread."""
-                    log("Exit requested from tray")
+                    logger.info("Quit from the tray")
                     os._exit(0)
 
                 def trigger_sync():
@@ -515,7 +465,7 @@ def serve(host: str | None, port: int | None, tray: bool | None):
                     try:
                         httpx.post(f"{web_url}/api/sync", json={}, timeout=10.0)
                     except Exception as e:
-                        log(f"Tray sync request failed: {e}")
+                        logger.warning(f"The tray could not start a sync: {e}")
 
                 def get_scheduler():
                     """Look up the scheduler, which the web app creates after the tray starts."""
@@ -529,53 +479,35 @@ def serve(host: str | None, port: int | None, tray: bool | None):
                     shutdown_callback=on_exit,
                     scheduler_getter=get_scheduler,
                 )
-                if not port_in_use:
-                    log("Starting tray")
                 tray_instance.start()
                 import time
                 time.sleep(0.5)
-                if not port_in_use:
-                    log("Tray started")
-            elif not silent_mode:
-                console.print("[yellow]System tray requested but dependencies not installed.[/]")
-                console.print("[yellow]Install with: pip install pystray Pillow[/]")
-        except ImportError as e:
-            log(f"ImportError: {e}")
-            if not silent_mode:
-                console.print("[yellow]System tray requested but dependencies not installed.[/]")
-                console.print("[yellow]Install with: pip install pystray Pillow[/]")
+            else:
+                logger.warning('The system tray needs pystray and Pillow: pip install "pakt[tray]"')
+        except ImportError:
+            logger.warning('The system tray needs pystray and Pillow: pip install "pakt[tray]"')
         except Exception as e:
-            log(f"Exception: {e}")
+            logger.exception(f"The tray failed to start: {type(e).__name__}: {e}")
 
     # once the tray is up, the conflict can show as a notification
     if port_in_use:
-        log("Attempting to show notification")
+        logger.error(f"Port {port} is already in use; another Pakt instance may be running")
         if tray_instance and tray_instance._icon:
             try:
                 tray_instance._icon.notify(
                     f"Port {port} already in use.\nAnother instance may be running.",
                     "Pakt"
                 )
-                log("Notification sent, waiting 3s")
             except Exception as e:
-                log(f"Notification failed: {e}")
+                logger.warning(f"Tray notification failed: {e}")
             import time
             time.sleep(3)
-        else:
-            log("No tray icon available for notification")
-        if not silent_mode:
-            console.print(f"[red]Error:[/] Port {port} already in use. Another instance may be running.")
-        log("Exiting due to port conflict")
-        if debug_log:
-            debug_log.close()
         return
 
+    logger.info(f"Web UI starting at {local_url}")
     if not silent_mode:
-        console.print("[bold]Starting Pakt web interface...[/]")
-        console.print(f"Open [cyan]{local_url}[/] in your browser")
-        console.print("[dim]Press Ctrl+C to stop[/]\n")
+        console.print("[dim]Open it in your browser. Press Ctrl+C to stop.[/]\n")
 
-    log("Creating app")
     app = create_app()
 
     class PaktServer(uvicorn.Server):
@@ -593,7 +525,6 @@ def serve(host: str | None, port: int | None, tray: bool | None):
             super().handle_exit(sig, frame)
 
     try:
-        log(f"Starting uvicorn on {host}:{port}")
         uvi_log_level = "critical" if silent_mode else "warning"
 
         uvi_config = uvicorn.Config(app, host=host, port=port, log_level=uvi_log_level)
@@ -601,24 +532,17 @@ def serve(host: str | None, port: int | None, tray: bool | None):
 
         if tray_instance and tray_instance._icon:
             try:
-                log("Sending startup notification")
                 tray_instance._icon.notify(f"Running on {local_url}", "Pakt")
             except Exception as e:
-                log(f"Notification failed: {e}")
+                logger.warning(f"Tray notification failed: {e}")
 
-        log("Running uvicorn server")
         import asyncio
         asyncio.run(server.serve())
-
-        log("uvicorn.serve() returned normally")
     except Exception as e:
-        import traceback
-        log(f"uvicorn error: {e}\n{traceback.format_exc()}")
+        logger.exception(f"Web UI failed: {type(e).__name__}: {e}")
         raise
     finally:
-        log("Shutting down")
-        if debug_log:
-            debug_log.close()
+        logger.info("Web UI stopped")
         if _devnull:
             _devnull.close()
         if tray_instance:

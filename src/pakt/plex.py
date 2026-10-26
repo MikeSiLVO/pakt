@@ -206,10 +206,7 @@ class PlexClient:
             except Exception as e:
                 if not self._url:
                     raise
-                logger.warning(
-                    "Discovery connect to '%s' failed (%s), trying direct URL",
-                    self._server_name, e,
-                )
+                logger.warning("Could not connect through plex.tv (%s), trying the saved address", e)
 
         if not (self._url and self._token):
             raise ValueError("Need either URL+token or token+server_name")
@@ -240,10 +237,10 @@ class PlexClient:
             return
 
         if new_url != self._url:
-            logger.info("Server URL changed: %s -> %s", self._url, new_url)
+            logger.info("Server address changed from %s to %s", self._url or "none", new_url)
             self._url = new_url
         if new_token != self._token:
-            logger.info("Server access token updated for '%s'", self._server_name)
+            logger.info("Saved this server's own access token")
             self._token = new_token
 
         try:
@@ -254,7 +251,15 @@ class PlexClient:
                 server.token = self._token
                 config.save()
         except Exception as e:
-            logger.warning("Failed to persist updated connection: %s", e)
+            logger.warning("Could not save the new connection details to config.json: %s", e)
+
+    @property
+    def route(self) -> str:
+        """How this connection reaches the server: over the LAN, or remotely over HTTPS or HTTP."""
+        url = str(self.server._baseurl or "")
+        if _is_lan_url(url):
+            return "over LAN"
+        return "remotely over HTTPS" if url.startswith("https") else "remotely over plain HTTP"
 
     @property
     def account_token(self) -> str:
@@ -342,10 +347,7 @@ class PlexClient:
                     future.result()
                 except Exception as e:
                     failed.append((item, e))
-                    logger.warning(f"Failed to mark watched: {item.title} - {e}")
-
-        if failed:
-            logger.error(f"Batch mark watched: {len(failed)}/{len(items)} failed")
+                    logger.warning(f"Plex could not mark '{item.title}' watched: {e}")
 
         return failed
 
@@ -375,10 +377,7 @@ class PlexClient:
                     future.result()
                 except Exception as e:
                     failed.append((item, rating, e))
-                    logger.warning(f"Failed to rate: {item.title} ({rating}) - {e}")
-
-        if failed:
-            logger.error(f"Batch rate: {len(failed)}/{len(items)} failed")
+                    logger.warning(f"Plex could not rate '{item.title}' {rating}: {e}")
 
         return failed
 
@@ -394,7 +393,7 @@ class PlexClient:
                 self.account.addToWatchlist(item)
             except Exception as e:
                 failed.append((item, e))
-                logger.warning(f"Failed to add to watchlist: {item.title} - {e}")
+                logger.warning(f"Plex could not add '{item.title}' to the watchlist: {e}")
         return failed
 
     def search_discover(self, query: str, libtype: str | None = None) -> list[Movie | Show]:
