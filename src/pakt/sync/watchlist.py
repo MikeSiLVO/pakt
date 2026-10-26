@@ -8,7 +8,8 @@ import time
 from typing import TYPE_CHECKING, Any, Callable
 
 from pakt.models import SyncResult
-from pakt.plex import PlexClient, extract_plex_ids
+from pakt.plex.client import PlexClient
+from pakt.plex.media import extract_plex_ids
 from pakt.sync import report
 from pakt.sync.match import MOVIE_ID_TYPES, SHOW_ID_TYPES, id_keys, trakt_item
 from pakt.trakt import TraktAccountLimitError

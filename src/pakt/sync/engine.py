@@ -11,7 +11,8 @@ from typing import Any, Callable, TypeVar
 
 from pakt.config import Config, ServerConfig
 from pakt.models import SyncResult
-from pakt.plex import PlexAuthError, PlexClient
+from pakt.plex.account import PlexAuthError
+from pakt.plex.client import PlexClient
 from pakt.sync import collection, episodes, movies, report, watchlist
 from pakt.trakt import TraktAuthError, TraktClient
 

@@ -383,7 +383,7 @@ def create_app() -> FastAPI:
     @app.get("/api/init")
     async def get_init() -> dict[str, Any]:
         """Get all data needed for page load in one request."""
-        from pakt.plex import PlexClient
+        from pakt.plex.client import PlexClient
         from pakt.trakt import TraktClient
 
         config = load_config_cached()
@@ -737,7 +737,7 @@ def create_app() -> FastAPI:
     @app.post("/api/plex/test")
     def test_plex_connection() -> dict[str, Any]:
         """Test Plex connection (first server)."""
-        from pakt.plex import PlexClient
+        from pakt.plex.client import PlexClient
 
         config = Config.load()
 
@@ -760,7 +760,7 @@ def create_app() -> FastAPI:
     @app.get("/api/plex/libraries")
     def get_plex_libraries() -> dict[str, Any]:
         """Get available Plex libraries and current selection (first server)."""
-        from pakt.plex import PlexClient
+        from pakt.plex.client import PlexClient
 
         try:
             config = Config.load()
@@ -797,8 +797,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/plex/pin")
     def start_plex_pin_login() -> dict[str, Any]:
-        """Start Plex PIN login flow."""
-        from pakt.plex import start_plex_pin_login as _start_pin
+        """Start Plex PIN login, keeping the login object for polling under its PIN ID."""
+        from pakt.plex.account import start_plex_pin_login as _start_pin
 
         _cleanup_expired_pins()
 
@@ -817,7 +817,7 @@ def create_app() -> FastAPI:
     @app.post("/api/plex/pin/{pin_id}")
     def check_plex_pin_login(pin_id: int) -> dict[str, Any]:
         """Check if Plex PIN login has been authorized, and save the Plex token when it has."""
-        from pakt.plex import check_plex_pin_login as _check_pin
+        from pakt.plex.account import check_plex_pin_login as _check_pin
 
         entry = _plex_pin_logins.get(pin_id)
         if not entry:
@@ -840,8 +840,8 @@ def create_app() -> FastAPI:
 
     @app.get("/api/plex/discover")
     def discover_plex_servers() -> dict[str, Any]:
-        """Discover Plex servers from account."""
-        from pakt.plex import discover_servers
+        """Discover Plex servers from the account, marking the ones already configured."""
+        from pakt.plex.account import discover_servers
 
         config = Config.load()
         if not config.plex_token:
@@ -908,8 +908,8 @@ def create_app() -> FastAPI:
 
     @app.post("/api/servers")
     async def add_server(request: ServerCreate) -> dict[str, Any]:
-        """Add a Plex server."""
-        from pakt.plex import discover_servers
+        """Add a Plex server, found through the account or entered by hand."""
+        from pakt.plex.account import discover_servers
 
         config = Config.load()
 
@@ -1001,7 +1001,7 @@ def create_app() -> FastAPI:
     @app.post("/api/servers/{name}/test")
     def test_server(name: str) -> dict[str, Any]:
         """Test connection to a specific server."""
-        from pakt.plex import PlexClient
+        from pakt.plex.client import PlexClient
 
         config = Config.load()
         server = config.get_server(name)
@@ -1024,7 +1024,7 @@ def create_app() -> FastAPI:
     @app.get("/api/servers/{name}/libraries")
     def get_server_libraries(name: str) -> dict[str, Any]:
         """Get a server's available libraries and the ones selected to sync."""
-        from pakt.plex import PlexClient
+        from pakt.plex.client import PlexClient
 
         config = Config.load()
         server = config.get_server(name)

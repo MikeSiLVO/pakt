@@ -230,7 +230,7 @@ def password(clear: bool):
 
 def _setup_plex_manual(config: Config) -> None:
     """Set up Plex from a pasted URL and token, testing the connection before saving."""
-    from pakt.plex import PlexClient
+    from pakt.plex.client import PlexClient
 
     console.print("[dim]Checking for local Plex server...[/]")
     detected_url = None
@@ -285,7 +285,7 @@ def _setup_plex_manual(config: Config) -> None:
 
 def _setup_plex_pin(config: Config) -> None:
     """Set up Plex by PIN login, then add the servers picked from the account."""
-    from pakt.plex import (
+    from pakt.plex.account import (
         check_plex_pin_login,
         discover_servers,
         start_plex_pin_login,
@@ -556,7 +556,7 @@ def serve(host: str | None, port: int | None, tray: bool | None):
 @click.option("--all", "sync_all", is_flag=True, help="Sync all libraries (clear selection)")
 def libraries(server: str | None, movie: tuple[str, ...], show: tuple[str, ...], sync_all: bool):
     """Configure which Plex libraries to sync, or list them when run without options."""
-    from pakt.plex import PlexClient
+    from pakt.plex.client import PlexClient
 
     config = Config.load()
 
@@ -673,7 +673,7 @@ def servers_list():
 @servers.command("discover")
 def servers_discover():
     """Discover available Plex servers from your account."""
-    from pakt.plex import discover_servers
+    from pakt.plex.account import discover_servers
 
     config = Config.load()
 
@@ -719,7 +719,7 @@ def servers_discover():
 @click.option("--disabled", is_flag=True, help="Add server as disabled")
 def servers_add(name: str, url: str | None, server_token: str | None, disabled: bool):
     """Add a Plex server, found through the account or entered by hand."""
-    from pakt.plex import discover_servers
+    from pakt.plex.account import discover_servers
 
     config = Config.load()
 
@@ -797,7 +797,7 @@ def servers_remove(name: str):
 @click.argument("name")
 def servers_test(name: str):
     """Test connection to a configured Plex server."""
-    from pakt.plex import PlexClient
+    from pakt.plex.client import PlexClient
 
     config = Config.load()
     server = config.get_server(name)

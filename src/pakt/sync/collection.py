@@ -9,7 +9,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from pakt.models import SyncResult
-from pakt.plex import extract_media_metadata, extract_plex_ids, media_score
+from pakt.plex.media import extract_media_metadata, extract_plex_ids, media_score
 from pakt.sync import report
 from pakt.sync.match import MOVIE_ID_TYPES, SHOW_ID_TYPES, group_by_show, id_keys, plex_dt_to_utc_iso, trakt_item
 from pakt.trakt import TraktAccountLimitError

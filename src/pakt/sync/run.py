@@ -15,7 +15,8 @@ from pakt import __version__
 from pakt.config import Config, get_config_dir, set_last_sync
 from pakt.log import forward_log, server_prefix
 from pakt.models import SyncResult
-from pakt.plex import PlexAuthError, PlexClient
+from pakt.plex.account import PlexAuthError
+from pakt.plex.client import PlexClient
 from pakt.sync import report
 from pakt.sync.engine import PushedToTrakt, SyncEngine, TraktCache
 from pakt.trakt import TraktAuthError, TraktClient
