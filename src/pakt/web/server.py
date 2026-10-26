@@ -123,6 +123,11 @@ def run_web_ui(host: str, port: int, tray: bool) -> None:
                 console.print("\n[dim]Shutting down...[/]")
             super().handle_exit(sig, frame)
 
+        async def shutdown(self, sockets: list[socket.socket] | None = None) -> None:
+            """Shut down, then log it; uvicorn re-raises SIGTERM after this, ending the process."""
+            await super().shutdown(sockets)
+            logger.info("Web UI stopped")
+
     try:
         server = PaktServer(uvicorn.Config(create_app(), host=host, port=port,
                                            log_level="critical" if tray else "warning"))
@@ -136,7 +141,6 @@ def run_web_ui(host: str, port: int, tray: bool) -> None:
         logger.exception(f"Web UI failed: {type(e).__name__}: {e}")
         raise
     finally:
-        logger.info("Web UI stopped")
         if devnull:
             devnull.close()
         if tray_icon:
