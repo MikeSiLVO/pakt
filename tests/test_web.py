@@ -4,6 +4,7 @@ from fastapi.testclient import TestClient
 from pakt import trakt
 from pakt.config import Config
 from pakt.web import app as web_app
+from pakt.web import state
 from pakt.web.auth import MAX_FAILURES, hash_password
 
 PASSWORD = "correct horse"
@@ -12,8 +13,8 @@ PASSWORD = "correct horse"
 @pytest.fixture(autouse=True)
 def fresh_app_state(monkeypatch):
     """Empty the app's module caches, giving each test a fresh config read."""
-    monkeypatch.setattr(web_app, "_config_cache", (0, None))
-    monkeypatch.setattr(web_app, "_cache", {})
+    monkeypatch.setattr(state, "_config_cache", (0, None))
+    monkeypatch.setattr(state, "_cache", {})
 
 
 def local_client() -> TestClient:
@@ -102,7 +103,7 @@ def test_new_password_ends_existing_sessions():
     client = remote_client()
     log_in(client)
     set_password("another password")
-    web_app.invalidate_config_cache()
+    state.invalidate_config_cache()
     assert client.get("/api/status").status_code == 401
 
 

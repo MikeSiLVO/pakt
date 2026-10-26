@@ -413,7 +413,8 @@ def serve(host: str | None, port: int | None, tray: bool | None):
     """Start the web interface."""
     import uvicorn
 
-    from pakt.web.app import create_app, sync_state
+    from pakt.web.app import create_app
+    from pakt.web.state import sync_state
 
     # save so config.json gains the web section
     config = Config.load()
@@ -468,10 +469,10 @@ def serve(host: str | None, port: int | None, tray: bool | None):
                         logger.warning(f"The tray could not start a sync: {e}")
 
                 def get_scheduler():
-                    """Look up the scheduler, which the web app creates after the tray starts."""
-                    from pakt.web import app as web_app
+                    """Get the scheduler, which the web app creates after the tray starts."""
+                    from pakt.web import state
 
-                    return web_app._scheduler
+                    return state.scheduler
 
                 tray_instance = PaktTray(
                     web_url=web_url,
