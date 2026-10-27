@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.1] - 2026-10-26
 
 ### Added
 - **Web UI: Test button on each server** in Settings, showing the server's name and libraries or the error
