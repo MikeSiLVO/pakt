@@ -19,6 +19,8 @@ try:
 except ImportError:
     TRAY_AVAILABLE = False
 
+MENU_CHECK_SECONDS = 60
+
 
 def _get_icon_image() -> "Image.Image":
     """Get the tray icon from assets, or draw a plain one."""
@@ -55,6 +57,7 @@ class PaktTray:
         # pystray is an optional import, so it cannot be named in a type expression
         self._icon: Any = None
         self._thread: threading.Thread | None = None
+        self._stopped = threading.Event()
 
     def _open_web_ui(self) -> None:
         """Open the web UI in the default browser."""
@@ -87,6 +90,19 @@ class PaktTray:
         scheduler = self._scheduler()
         return bool(scheduler and scheduler.is_enabled and scheduler.next_run)
 
+    def _labels(self) -> tuple[str, bool]:
+        """What the menu's changing items show, compared to tell when it needs rebuilding."""
+        return self._next_sync_text(None), self._has_next_sync(None)
+
+    def _watch_menu(self, icon: Any) -> None:
+        """Watch the labels and rebuild the menu on a change, as Windows builds it once."""
+        shown = None
+        while not self._stopped.wait(MENU_CHECK_SECONDS):
+            labels = self._labels()
+            if labels != shown:
+                shown = labels
+                icon.update_menu()
+
     def _get_menu(self) -> "pystray.Menu":
         """Get the context menu; labels are callables, built before the scheduler exists."""
         return pystray.Menu(
@@ -104,7 +120,7 @@ class PaktTray:
         )
 
     def start(self) -> None:
-        """Start the system tray icon in a background thread."""
+        """Start the system tray icon and its menu watcher in background threads."""
         if not TRAY_AVAILABLE:
             return
 
@@ -123,9 +139,11 @@ class PaktTray:
 
         self._thread = threading.Thread(target=run_icon, daemon=True)
         self._thread.start()
+        threading.Thread(target=self._watch_menu, args=(icon,), daemon=True).start()
 
     def stop(self) -> None:
-        """Stop the system tray icon."""
+        """Stop the system tray icon and its menu watcher."""
+        self._stopped.set()
         if self._icon:
             self._icon.stop()
             self._icon = None

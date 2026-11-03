@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Fixed
+- **On Windows the tray menu's next sync time only appeared after a menu click, and then went stale** - The menu follows the scheduler within a minute
+
 ## [0.5.1] - 2026-10-26
 
 ### Added
