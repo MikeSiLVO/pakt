@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from pakt import __version__
+from pakt import __version__, updates
 from pakt.config import Config, ServerConfig
 from pakt.models import PlexIds, RatedItem, SyncResult, WatchedItem
 from pakt.sync import collection, episodes, match, movies, report, run, watchlist
@@ -404,6 +404,27 @@ async def test_unreachable_server_logs_an_error_and_fails_the_run(monkeypatch):
     assert lines[-1].startswith("ERROR:Sync finished in ")
     assert lines[-1].endswith(" with 1 error, 0 of 1 server: no changes")
     assert result.errors == ["[Home] server unreachable"]
+
+
+async def test_failed_run_names_a_newer_release(monkeypatch):
+    """A run that ends with errors names a newer release just above its closing line."""
+    monkeypatch.setattr(updates, "_fetch_latest", lambda: "99.0.0")
+    _, lines = await run_logged(monkeypatch, UnreachablePlex)
+    assert lines[-2] == f"WARNING:pakt 99.0.0 is available and may fix these errors: {updates.release_url('99.0.0')}"
+    assert lines[-1].startswith("ERROR:Sync finished in ")
+
+
+async def test_clean_run_does_not_ask_pypi(monkeypatch):
+    """A run without errors leaves the update check alone."""
+    async def unchanged(self, **kwargs):
+        """Report a sync that changed nothing."""
+        return SyncResult()
+
+    asked = []
+    monkeypatch.setattr(updates, "_fetch_latest", lambda: asked.append(True) or "99.0.0")
+    monkeypatch.setattr(SyncEngine, "sync", unchanged)
+    _, lines = await run_logged(monkeypatch, ReachablePlex)
+    assert asked == [] and lines[-1].startswith("SUCCESS:Sync finished in ")
 
 
 async def test_dead_trakt_token_ends_the_run_with_an_error(monkeypatch):

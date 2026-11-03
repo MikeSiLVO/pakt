@@ -8,6 +8,8 @@ import webbrowser
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
+from pakt import updates
+
 if TYPE_CHECKING:
     from pakt.scheduler import SyncScheduler
 
@@ -38,7 +40,7 @@ def _get_icon_image() -> "Image.Image":
 
 
 class PaktTray:
-    """System tray icon for Pakt; it looks up the scheduler on demand, as that starts later."""
+    """Tray icon; it looks up the scheduler and newer release on demand, as both come later."""
 
     def __init__(
         self,
@@ -46,6 +48,7 @@ class PaktTray:
         sync_callback: Callable[[], None] | None = None,
         shutdown_callback: Callable[[], None] | None = None,
         scheduler_getter: Callable[[], "SyncScheduler | None"] | None = None,
+        update_getter: Callable[[], str | None] | None = None,
     ) -> None:
         if not TRAY_AVAILABLE:
             raise ImportError("pystray and Pillow are required for system tray support")
@@ -54,6 +57,7 @@ class PaktTray:
         self.sync_callback = sync_callback
         self.shutdown_callback = shutdown_callback
         self.scheduler_getter = scheduler_getter
+        self.update_getter = update_getter
         # pystray is an optional import, so it cannot be named in a type expression
         self._icon: Any = None
         self._thread: threading.Thread | None = None
@@ -90,9 +94,28 @@ class PaktTray:
         scheduler = self._scheduler()
         return bool(scheduler and scheduler.is_enabled and scheduler.next_run)
 
-    def _labels(self) -> tuple[str, bool]:
+    def _newer_version(self) -> str | None:
+        """Newer pakt release the update check found, or None."""
+        return self.update_getter() if self.update_getter else None
+
+    def _update_text(self, _item: Any) -> str:
+        """Menu label naming the newer release."""
+        newer = self._newer_version()
+        return f"Update available: {newer}" if newer else ""
+
+    def _has_update(self, _item: Any) -> bool:
+        """Whether there is a newer release worth showing."""
+        return self._newer_version() is not None
+
+    def _open_release(self) -> None:
+        """Open the newer release's notes in the default browser."""
+        newer = self._newer_version()
+        if newer:
+            webbrowser.open(updates.release_url(newer))
+
+    def _labels(self) -> tuple[str, bool, str]:
         """What the menu's changing items show, compared to tell when it needs rebuilding."""
-        return self._next_sync_text(None), self._has_next_sync(None)
+        return self._next_sync_text(None), self._has_next_sync(None), self._update_text(None)
 
     def _watch_menu(self, icon: Any) -> None:
         """Watch the labels and rebuild the menu on a change, as Windows builds it once."""
@@ -116,6 +139,8 @@ class PaktTray:
                 enabled=False,
                 visible=self._has_next_sync,  # type: ignore[arg-type]
             ),
+            pystray.MenuItem(self._update_text, self._open_release,
+                             visible=self._has_update),  # type: ignore[arg-type]
             pystray.MenuItem("Exit", self._exit),
         )
 

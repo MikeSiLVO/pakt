@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- **Update notice** - The web UI, the tray menu and `pakt status` show when a newer Pakt is on PyPI, and a sync that ends with errors names it in sync.log. Pakt asks PyPI once a day; set `check_updates` to false in config.json to stop it
+
 ### Fixed
 - **On Windows the tray menu's next sync time only appeared after a menu click, and then went stale** - The menu follows the scheduler within a minute
 

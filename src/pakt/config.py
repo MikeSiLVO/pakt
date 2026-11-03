@@ -121,6 +121,7 @@ class Config(BaseModel):
     web: WebConfig = Field(default_factory=WebConfig)
     sync: SyncConfig = Field(default_factory=SyncConfig)
     scheduler: SchedulerConfig = Field(default_factory=SchedulerConfig)
+    check_updates: bool = True
     plex_token: str = ""
     plex_client_id: str = ""
     servers: list[ServerConfig] = Field(default_factory=list)

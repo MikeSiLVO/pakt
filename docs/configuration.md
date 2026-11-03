@@ -33,6 +33,7 @@ interrupted write cannot leave a truncated config behind.
     "enabled": false,
     "interval_hours": 0
   },
+  "check_updates": true,
   "plex_token": "your-plex-account-token",
   "servers": [
     {
@@ -103,6 +104,12 @@ Automatic sync scheduling. Only active while `pakt serve` is running.
 |-------|------|---------|-------------|
 | `enabled` | boolean | `false` | Enable automatic scheduled syncs |
 | `interval_hours` | integer | `0` | Hours between syncs (0 = disabled). The web UI requires at least 1. |
+
+---
+
+### `check_updates`
+
+Whether Pakt asks PyPI once a day for a newer version. A newer version shows in the web UI, the tray menu and `pakt status`, and in `sync.log` when a sync ends with errors. Default `true`.
 
 ---
 

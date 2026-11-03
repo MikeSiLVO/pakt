@@ -4,8 +4,8 @@ from types import SimpleNamespace
 import pytest
 from fastapi.testclient import TestClient
 
-from pakt import trakt
-from pakt.config import Config, ServerConfig, set_last_sync
+from pakt import trakt, updates
+from pakt.config import Config, ServerConfig, get_config_dir, set_last_sync
 from pakt.plex import client as plex_client
 from pakt.web import app as web_app
 from pakt.web import state
@@ -299,6 +299,14 @@ def test_scheduler_status_shows_the_last_sync_when_off():
     set_last_sync(finished)
     status = local_client().get("/api/scheduler/status").json()
     assert status["next_run"] is None and status["last_run"] == finished.isoformat()
+
+
+def test_page_load_names_a_newer_release():
+    """The page's init data names a newer release and its notes, and nothing when there is none."""
+    assert local_client().get("/api/init").json()["update"] is None
+    (get_config_dir() / updates.LATEST_FILE).write_text("99.0.0", encoding="utf-8")
+    assert local_client().get("/api/init").json()["update"] == {
+        "version": "99.0.0", "url": updates.release_url("99.0.0")}
 
 
 def test_trakt_client_id_cannot_be_changed_over_the_api():

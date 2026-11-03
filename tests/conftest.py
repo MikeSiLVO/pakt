@@ -4,6 +4,14 @@ import logging
 
 import pytest
 
+from pakt import updates
+
+
+@pytest.fixture(autouse=True)
+def offline_update_check(monkeypatch):
+    """Answer the update check without PyPI, as if it were unreachable."""
+    monkeypatch.setattr(updates, "_fetch_latest", lambda: "")
+
 
 @pytest.fixture(autouse=True)
 def config_home(tmp_path, monkeypatch):

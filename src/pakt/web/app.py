@@ -13,7 +13,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 
-from pakt import __version__
+from pakt import __version__, updates
 from pakt.config import Config, get_config_dir
 from pakt.web import state
 from pakt.web.api import plex, servers, status, sync, trakt
@@ -29,6 +29,7 @@ from pakt.web.auth import (
 
 PUBLIC_PATHS = ("/login", "/favicon.ico", "/assets/")
 MAX_LOGIN_BODY = 4096
+UPDATE_POLL_SECONDS = 60 * 60
 
 
 def _host_allowed(host: str, allowed_hosts: list[str]) -> bool:
@@ -49,15 +50,24 @@ def _host_allowed(host: str, allowed_hosts: list[str]) -> bool:
         return False
 
 
+async def _check_updates() -> None:
+    """Check for a newer release while the app runs; PyPI is asked at most once a day."""
+    while True:
+        await asyncio.to_thread(updates.refresh, state.load_config_cached())
+        await asyncio.sleep(UPDATE_POLL_SECONDS)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Start the scheduler with the app when config enables it, and stop it on shutdown."""
+    """Start the update check, and the scheduler when config enables it; stop both on shutdown."""
     config = Config.load()
     if config.scheduler.enabled and config.scheduler.interval_hours > 0:
         sync.start_scheduler(config)
+    checker = asyncio.create_task(_check_updates())
 
     yield
 
+    checker.cancel()
     if state.scheduler:
         state.scheduler.stop()
 

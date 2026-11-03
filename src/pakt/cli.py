@@ -187,7 +187,9 @@ def password(clear: bool):
 
 @main.command()
 def status():
-    """Show current configuration status."""
+    """Show current configuration status and any newer release on PyPI."""
+    from pakt import updates
+
     config = Config.load()
     config_dir = get_config_dir()
 
@@ -216,6 +218,11 @@ def status():
     else:
         console.print("\n[yellow]No Plex servers configured[/]")
         console.print("[dim]Run 'pakt setup' to configure[/]")
+
+    updates.refresh(config)
+    newer = updates.newer_version(config)
+    if newer:
+        console.print(f"\n[yellow]pakt {newer} is available:[/] {updates.release_url(newer)}")
 
     console.print(f"\n[dim]Config directory: {config_dir}[/]")
 

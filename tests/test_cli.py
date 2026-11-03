@@ -1,6 +1,6 @@
 from click.testing import CliRunner
 
-from pakt import cli
+from pakt import cli, updates
 from pakt.config import Config
 from pakt.web.auth import check_password
 
@@ -27,6 +27,13 @@ def test_clear_removes_the_password():
     CliRunner().invoke(cli.main, ["password", "--clear"])
     web = Config.load().web
     assert web.password_hash == "" and web.session_secret == ""
+
+
+def test_status_names_a_newer_release(monkeypatch):
+    """`pakt status` names a newer release on PyPI."""
+    monkeypatch.setattr(updates, "_fetch_latest", lambda: "99.0.0")
+    result = CliRunner().invoke(cli.main, ["status"])
+    assert result.exit_code == 0 and "pakt 99.0.0 is available" in result.output
 
 
 def test_sync_without_trakt_login_exits_with_an_error():

@@ -8,6 +8,7 @@ from typing import Any, Literal
 from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
+from pakt import updates
 from pakt.config import Config, SyncConfig
 from pakt.web import state
 from pakt.web.api.servers import list_libraries, server_json
@@ -62,6 +63,7 @@ async def get_init() -> dict[str, Any]:
             entry["libraries"] = {"movie": [], "show": []}
         servers.append(entry)
 
+    newer = updates.newer_version(config)
     return {
         "status": await get_status(),
         "config": {
@@ -70,6 +72,7 @@ async def get_init() -> dict[str, Any]:
         },
         "servers": servers,
         "trakt_account": await account_status(config) if config.trakt.access_token else None,
+        "update": {"version": newer, "url": updates.release_url(newer)} if newer else None,
     }
 
 

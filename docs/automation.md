@@ -179,6 +179,10 @@ Adjust the path to `pakt` based on your installation (`which pakt`).
 report it. Each run is logged to `sync.log` in the config folder, see
 [Logs](https://github.com/MikeSiLVO/Pakt/blob/main/docs/troubleshooting.md#logs).
 
+## Updates
+
+A scheduled `pakt sync` names a newer version in `sync.log` only when a run ends with errors. To hear about every release, watch the [GitHub repository](https://github.com/MikeSiLVO/pakt) for releases (Watch, Custom, Releases), or follow the PyPI feed at https://pypi.org/rss/project/pakt/releases.xml.
+
 ## Built-in Scheduler
 
 Alternatively, use Pakt's built-in scheduler via the web UI:

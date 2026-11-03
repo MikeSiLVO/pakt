@@ -11,7 +11,7 @@ from collections.abc import Generator
 from datetime import datetime, timezone
 from typing import Callable
 
-from pakt import __version__
+from pakt import __version__, updates
 from pakt.config import Config, get_config_dir, set_last_sync
 from pakt.log import forward_log, server_prefix
 from pakt.models import SyncResult
@@ -62,7 +62,7 @@ async def run_multi_server_sync(
     cancel_check: Callable[[], bool] | None = None,
     started_by: str = "CLI",
 ) -> SyncResult:
-    """Run sync across multiple Plex servers, refusing to start while another process is syncing."""
+    """Run sync across servers unless another process is syncing; errors name any newer release."""
     with forward_log(log_callback):
         if server_names:
             servers_to_sync = []
@@ -164,5 +164,10 @@ async def run_multi_server_sync(
             if synced and not dry_run:
                 set_last_sync(datetime.now(timezone.utc))
 
+        if total_result.errors and not cancelled:
+            await asyncio.to_thread(updates.refresh, config)
+            newer = updates.newer_version(config)
+            if newer:
+                logger.warning(f"pakt {newer} is available and may fix these errors: {updates.release_url(newer)}")
         report.summary(total_result, synced, server_count, dry_run, cancelled)
         return total_result

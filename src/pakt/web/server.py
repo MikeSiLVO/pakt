@@ -9,6 +9,7 @@ import sys
 import time
 from typing import TYPE_CHECKING
 
+from pakt import updates
 from pakt.log import console
 from pakt.web import state
 
@@ -59,6 +60,7 @@ def _start_tray(web_url: str) -> PaktTray | None:
             sync_callback=trigger_sync,
             shutdown_callback=on_exit,
             scheduler_getter=lambda: state.scheduler,
+            update_getter=lambda: updates.newer_version(state.load_config_cached()),
         )
         tray.start()
         time.sleep(0.5)
