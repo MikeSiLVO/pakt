@@ -1,7 +1,10 @@
+import os
 from types import SimpleNamespace
 
 import pytest
 
+# default Linux backends open a display on import, and CI runs headless
+os.environ["PYSTRAY_BACKEND"] = "dummy"
 pytest.importorskip("pystray")
 
 from pakt import tray  # noqa: E402
