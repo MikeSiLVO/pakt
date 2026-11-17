@@ -1,6 +1,9 @@
+import asyncio
+import time
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi.testclient import TestClient
 
@@ -90,6 +93,43 @@ def test_repeated_misses_lock_the_address_out():
     for _ in range(MAX_FAILURES):
         log_in(client, "wrong password")
     assert log_in(client).status_code == 429
+
+
+def remote_async_client() -> httpx.AsyncClient:
+    """Another device on the LAN, able to send requests in parallel."""
+    transport = httpx.ASGITransport(app=web_app.create_app(), client=("192.168.1.20", 50000))
+    return httpx.AsyncClient(transport=transport, base_url="http://192.168.1.5:7258")
+
+
+async def test_parallel_wrong_logins_check_at_most_five_passwords(monkeypatch):
+    """A burst of wrong logins from one address is locked out before most reach the check."""
+    set_password()
+    checked = []
+
+    def slow_check(password, stored):
+        """Take long enough for the other requests to arrive meanwhile."""
+        checked.append(password)
+        time.sleep(0.05)
+        return False
+
+    monkeypatch.setattr(web_app, "check_password", slow_check)
+    async with remote_async_client() as client:
+        replies = await asyncio.gather(*(client.post("/login", data={"password": "wrong"}) for _ in range(20)))
+    assert len(checked) == MAX_FAILURES
+    assert sum(reply.status_code == 429 for reply in replies) == 20 - MAX_FAILURES
+
+
+async def test_oversized_login_body_is_refused_without_a_length():
+    """A chunked login body with no Content-Length is cut off at the size limit."""
+    set_password()
+
+    async def chunks():
+        """Stream far more than the limit."""
+        for _ in range(64):
+            yield b"x" * 1024
+
+    async with remote_async_client() as client:
+        assert (await client.post("/login", content=chunks())).status_code == 413
 
 
 def test_logout_ends_the_session():

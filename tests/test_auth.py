@@ -65,14 +65,14 @@ def test_throttle_locks_after_five_misses_then_lifts(monkeypatch):
     monkeypatch.setattr(auth.time, "time", lambda: now[0])
     throttle = auth.LoginThrottle()
     for _ in range(auth.MAX_FAILURES - 1):
-        throttle.record_failure("1.2.3.4")
+        throttle.record_attempt("1.2.3.4")
     assert not throttle.locked("1.2.3.4")
-    throttle.record_failure("1.2.3.4")
+    throttle.record_attempt("1.2.3.4")
     assert throttle.locked("1.2.3.4")
     assert not throttle.locked("5.6.7.8")
     now[0] += auth.LOCKOUT_SECONDS + 1
     assert not throttle.locked("1.2.3.4")
-    throttle.record_failure("1.2.3.4")
+    throttle.record_attempt("1.2.3.4")
     assert not throttle.locked("1.2.3.4")
 
 
@@ -80,6 +80,6 @@ def test_throttle_clears_on_success():
     """A successful login forgets earlier misses."""
     throttle = auth.LoginThrottle()
     for _ in range(auth.MAX_FAILURES):
-        throttle.record_failure("1.2.3.4")
+        throttle.record_attempt("1.2.3.4")
     throttle.clear("1.2.3.4")
     assert not throttle.locked("1.2.3.4")

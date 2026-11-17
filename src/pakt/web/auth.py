@@ -76,7 +76,7 @@ def is_local(client_host: str | None, host_header: str, headers: Mapping[str, st
 
 
 class LoginThrottle:
-    """Failed logins per address, locking an address out for a minute after five misses."""
+    """Login attempts per address, locking an address out for a minute after five unsuccessful."""
 
     def __init__(self) -> None:
         self._failures: dict[str, tuple[int, float]] = {}
@@ -86,13 +86,13 @@ class LoginThrottle:
         count, since = self._failures.get(address, (0, 0.0))
         return count >= MAX_FAILURES and time.time() - since < LOCKOUT_SECONDS
 
-    def record_failure(self, address: str) -> None:
-        """Count a failed login, starting the count over after a full lockout."""
+    def record_attempt(self, address: str) -> None:
+        """Record a login attempt before its password is checked, starting over after a lockout."""
         count, _ = self._failures.get(address, (0, 0.0))
         if count >= MAX_FAILURES:
             count = 0
         self._failures[address] = (count + 1, time.time())
 
     def clear(self, address: str) -> None:
-        """Forget an address's failures after it logs in."""
+        """Clear an address's attempts after it logs in."""
         self._failures.pop(address, None)

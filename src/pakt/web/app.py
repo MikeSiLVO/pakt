@@ -184,11 +184,15 @@ def create_app() -> FastAPI:
             return login_page(request, status_code=403)
         if throttle.locked(address):
             return login_page(request, "Too many attempts. Wait a minute and try again.", 429)
-        if int(request.headers.get("content-length") or 0) > MAX_LOGIN_BODY:
-            return login_page(request, "Request too large.", 413)
-        form = parse_qs((await request.body()).decode(errors="replace"))
+        # counted before the first await; parallel attempts read the lock meanwhile
+        throttle.record_attempt(address)
+        body = b""
+        async for chunk in request.stream():
+            body += chunk
+            if len(body) > MAX_LOGIN_BODY:
+                return login_page(request, "Request too large.", 413)
+        form = parse_qs(body.decode(errors="replace"))
         if not await asyncio.to_thread(check_password, form.get("password", [""])[0], web.password_hash):
-            throttle.record_failure(address)
             return login_page(request, "Wrong password.", 401)
         throttle.clear(address)
         response = RedirectResponse("/", status_code=303)
