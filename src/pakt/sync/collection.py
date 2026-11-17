@@ -35,10 +35,15 @@ async def _movies_to_collect(engine: SyncEngine, plex_movies: list, collected: s
     """Movies to collect, each title once from its best copy; stops on a cancel."""
     best: dict[tuple, tuple[int, dict]] = {}
     slots: dict[tuple, tuple] = {}
+    collected = set(collected)
     async for plex_movie in engine.paced(plex_movies, 3, 25, 20, "Movies"):
         plex_ids = extract_plex_ids(plex_movie)
         keys = id_keys(plex_ids, MOVIE_ID_TYPES)
-        if not keys or any(key in collected for key in keys):
+        if not keys:
+            continue
+        if any(key in collected for key in keys):
+            # its other copies may carry only ids Trakt did not list
+            collected.update(keys)
             continue
         slot = next((slots[key] for key in keys if key in slots), keys[0])
         for key in keys:
@@ -62,7 +67,7 @@ async def _episodes_to_collect(
     show_info = {str(show.ratingKey): (extract_plex_ids(show), show.title, show.year) for show in plex_shows}
     rows: list[tuple[dict, int, dict, str]] = []
     shows_seen: set[tuple] = set()
-    seen: set[tuple] = set()
+    seen = set(collected)
     unnumbered = 0
     async for episode in engine.paced(plex_episodes, 3, 45, 30, "Episodes"):
         info = show_info.get(str(episode.grandparentRatingKey))
@@ -74,9 +79,11 @@ async def _episodes_to_collect(
             unnumbered += 1
             continue
         ep_keys = [(key, season, number) for key in keys]
-        if any(k in seen or k in collected for k in ep_keys):
-            continue
+        known = any(k in seen for k in ep_keys)
+        # its other copies may carry only ids Trakt did not list
         seen.update(ep_keys)
+        if known:
+            continue
         shows_seen.add(keys[0])
         entry: dict[str, Any] = {"number": number}
         collected_at = plex_dt_to_utc_iso(getattr(episode, "addedAt", None))

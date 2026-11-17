@@ -444,8 +444,9 @@ async def collect_episodes(collected_numbers, fix_dates=False):
 
 
 async def test_collection_sends_each_missing_episode_once():
-    """Episodes of a show held twice under different ids go once."""
+    """Episodes of a show held twice under different ids go once, and collected ones not at all."""
     assert await collect_episodes([]) == [1, 2]
+    assert await collect_episodes([1]) == [2]
 
 
 async def test_fixing_collection_dates_resends_collected_episodes():
