@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable
+from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass, field
 from typing import Any, Callable, TypeVar
 
@@ -107,6 +107,26 @@ class SyncEngine:
         overall = ((phase - 1) * phase_weight) + (percent / 100 * phase_weight)
         if self._log_callback:
             self._log_callback(f"PROGRESS:{phase}:{overall:.1f}:{label}")
+
+    async def paced(
+        self, items: list, phase: int, start: float, span: float, label: str,
+        on_step: Callable[[int], None] | None = None,
+    ) -> AsyncIterator[Any]:
+        """Yield items, reporting progress across the given range; stops early on a cancel."""
+        total = len(items)
+        update_interval = max(1, total // 100)
+        # long loops on the event loop stall the web UI and the cancel check
+        yield_interval = max(1, min(500, total // 200))
+        for i, item in enumerate(items):
+            if i % yield_interval == 0:
+                await asyncio.sleep(0)
+                if self.is_cancelled():
+                    return
+            if i % update_interval == 0:
+                self.progress(phase, 4, start + (i / total) * span, f"{label} {i}/{total}")
+                if on_step:
+                    on_step(i)
+            yield item
 
     async def fetch_plex(
         self, fetch: Callable[[list[str] | None], tuple[list, dict[str, int]]],

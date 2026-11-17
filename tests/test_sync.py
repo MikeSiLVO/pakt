@@ -385,6 +385,74 @@ async def test_collection_uses_the_best_copy():
     assert len(sent) == 1 and sent[0]["resolution"] == "uhd_4k"
 
 
+class ShowLibrary(FakePlex):
+    """PlexClient stand-in serving shows and their episodes."""
+
+    def __init__(self, shows, episodes):
+        super().__init__([])
+        self.shows, self.episodes = shows, episodes
+
+    def get_all_shows_with_counts(self, libraries):
+        """Get the shows given to the fake as one library."""
+        return self.shows, {"TV": len(self.shows)}
+
+    def get_all_episodes_with_counts(self, libraries):
+        """Get the episodes given to the fake as one library."""
+        return self.episodes, {"TV": len(self.episodes)}
+
+
+async def collect_episodes(collected_numbers, fix_dates=False):
+    """Collect S01E01 and S01E02 of one show held twice under different ids; return numbers sent."""
+    class EpisodeTrakt(FakeTrakt):
+        """VIP TraktClient stand-in whose collection holds the given S01 episodes of TVDB show 1."""
+
+        async def get_account_limits(self):
+            """Get a VIP account's limits."""
+            return SimpleNamespace(is_vip=True, collection_limit=0)
+
+        async def get_collection_movies(self):
+            """Get an empty movie collection."""
+            return []
+
+        async def get_collection_shows(self):
+            """Get the show with its collected episodes."""
+            if not collected_numbers:
+                return []
+            episodes = [{"number": n} for n in collected_numbers]
+            return [{"show": {"ids": {"tvdb": 1}}, "seasons": [{"number": 1, "episodes": episodes}]}]
+
+        async def add_to_collection(self, **lists):
+            """Record a collection write."""
+            self.posts.append(("collection", lists))
+            return {}
+
+    def show(key, guids):
+        """A Plex show carrying the given external GUIDs."""
+        return SimpleNamespace(ratingKey=key, guid=f"plex://show/{key}", guids=[SimpleNamespace(id=g) for g in guids],
+                               title="Show", year=2000)
+
+    shows = [show("s1", ["tvdb://1", "tmdb://5"]), show("s2", ["tmdb://5"])]
+    episodes = [plex_episode(key, 1, n) for key in ("s1", "s2") for n in (1, 2)]
+    config = Config()
+    config.sync.collection_plex_to_trakt = True
+    trakt = EpisodeTrakt()
+    engine = SyncEngine(config, trakt, ShowLibrary(shows, episodes))
+    engine.fix_collection_dates = fix_dates
+    assert await collection.run(engine, SyncResult(), dry_run=False, no_movies=True)
+    return [e["number"] for _, lists in trakt.posts for s in lists.get("shows") or []
+            for season in s["seasons"] for e in season["episodes"]]
+
+
+async def test_collection_sends_each_missing_episode_once():
+    """Episodes of a show held twice under different ids go once."""
+    assert await collect_episodes([]) == [1, 2]
+
+
+async def test_fixing_collection_dates_resends_collected_episodes():
+    """Fixing dates sends episodes Trakt already has, still once each."""
+    assert await collect_episodes([1, 2], fix_dates=True) == [1, 2]
+
+
 class TraktSession:
     """TraktClient stand-in for a whole run, opening without a network."""
 

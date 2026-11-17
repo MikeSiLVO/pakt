@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import gc
 import logging
 import time
@@ -18,6 +17,97 @@ if TYPE_CHECKING:
     from pakt.sync.engine import SyncEngine
 
 logger = logging.getLogger(__name__)
+
+
+def _collected_keys(movies: list[dict], shows: list[dict]) -> tuple[set[tuple], set[tuple]]:
+    """Keys of the movies and the episodes already in the Trakt collection."""
+    movie_keys = {key for item in movies for key in id_keys(item.get("movie", {}).get("ids", {}), MOVIE_ID_TYPES)}
+    episode_keys: set[tuple] = set()
+    for item in shows:
+        keys = id_keys(item.get("show", {}).get("ids", {}), SHOW_ID_TYPES)
+        for season in item.get("seasons", []):
+            for ep in season.get("episodes", []):
+                episode_keys.update((key, season.get("number", 0), ep.get("number", 0)) for key in keys)
+    return movie_keys, episode_keys
+
+
+async def _movies_to_collect(engine: SyncEngine, plex_movies: list, collected: set[tuple]) -> list[dict]:
+    """Movies to collect, each title once from its best copy; stops on a cancel."""
+    best: dict[tuple, tuple[int, dict]] = {}
+    slots: dict[tuple, tuple] = {}
+    async for plex_movie in engine.paced(plex_movies, 3, 25, 20, "Movies"):
+        plex_ids = extract_plex_ids(plex_movie)
+        keys = id_keys(plex_ids, MOVIE_ID_TYPES)
+        if not keys or any(key in collected for key in keys):
+            continue
+        slot = next((slots[key] for key in keys if key in slots), keys[0])
+        for key in keys:
+            slots.setdefault(key, slot)
+        score, media = best_media(plex_movie)
+        if slot in best and best[slot][0] >= score:
+            continue
+        movie = trakt_item(plex_movie, plex_ids, MOVIE_ID_TYPES) or {}
+        movie.update(extract_media_metadata(media))
+        collected_at = plex_dt_to_utc_iso(getattr(plex_movie, "addedAt", None))
+        if collected_at:
+            movie["collected_at"] = collected_at
+        best[slot] = (score, movie)
+    return [movie for _, movie in best.values()]
+
+
+async def _episodes_to_collect(
+    engine: SyncEngine, plex_shows: list, plex_episodes: list, collected: set[tuple],
+) -> tuple[list[tuple[dict, int, dict, str]], int, int]:
+    """Episode rows to collect, plus show and unnumbered counts; stops on a cancel."""
+    show_info = {str(show.ratingKey): (extract_plex_ids(show), show.title, show.year) for show in plex_shows}
+    rows: list[tuple[dict, int, dict, str]] = []
+    shows_seen: set[tuple] = set()
+    seen: set[tuple] = set()
+    unnumbered = 0
+    async for episode in engine.paced(plex_episodes, 3, 45, 30, "Episodes"):
+        info = show_info.get(str(episode.grandparentRatingKey))
+        keys = id_keys(info[0], SHOW_ID_TYPES) if info else []
+        if not info or not keys:
+            continue
+        season, number = episode.parentIndex, episode.index
+        if season is None or number is None:
+            unnumbered += 1
+            continue
+        ep_keys = [(key, season, number) for key in keys]
+        if any(k in seen or k in collected for k in ep_keys):
+            continue
+        seen.update(ep_keys)
+        shows_seen.add(keys[0])
+        entry: dict[str, Any] = {"number": number}
+        collected_at = plex_dt_to_utc_iso(getattr(episode, "addedAt", None))
+        if collected_at:
+            entry["collected_at"] = collected_at
+        _, title, year = info
+        rows.append(({"title": title, "year": year, "ids": dict(keys)}, season, entry, ""))
+    return rows, len(shows_seen), unnumbered
+
+
+def _describe(movies: list[dict], episodes: int, shows: int, fixing: bool) -> str:
+    """Describe what the phase sends, such as 'Trakt +2 movies, +5 episodes of 1 show'."""
+    sending = [report.plural(len(movies), "movie")] if movies else []
+    if episodes:
+        sending.append(f"{report.plural(episodes, 'episode')} of {report.plural(shows, 'show')}")
+    if not sending:
+        return "no changes"
+    if fixing:
+        return f"re-sending {' and '.join(sending)} with Plex dates"
+    return f"Trakt +{', +'.join(sending)}"
+
+
+def _list_items(movies: list[dict], shows: list[dict]) -> None:
+    """List each movie and show being sent, with up to five episode codes per show."""
+    for movie in movies:
+        added = f", added {movie['collected_at'][:10]}" if movie.get("collected_at") else ""
+        report.item(f"Trakt collected: {report.title(movie)}{added}")
+    for show in shows:
+        codes = [f"S{s['number']:02d}E{e['number']:02d}" for s in show["seasons"] for e in s["episodes"]]
+        listed = ", ".join(codes[:5]) + (f" and {len(codes) - 5} more" if len(codes) > 5 else "")
+        report.item(f"Trakt collected: {show['title']} {listed}")
 
 
 async def run(engine: SyncEngine, result: SyncResult, dry_run: bool,
@@ -65,112 +155,29 @@ async def run(engine: SyncEngine, result: SyncResult, dry_run: bool,
         )
         return True
 
-    collected_movies = {key for item in trakt_collection_movies
-                        for key in id_keys(item.get("movie", {}).get("ids", {}), MOVIE_ID_TYPES)}
-    collected_episodes: set[tuple] = set()
-    for item in trakt_collection_shows:
-        keys = id_keys(item.get("show", {}).get("ids", {}), SHOW_ID_TYPES)
-        for season in item.get("seasons", []):
-            for ep in season.get("episodes", []):
-                collected_episodes.update((key, season.get("number", 0), ep.get("number", 0)) for key in keys)
-
     fixing = engine.fix_collection_dates
-    best: dict[tuple, tuple[int, dict]] = {}
-    slots: dict[tuple, tuple] = {}
-    total_movies = len(plex_movies)
-    update_interval = max(1, total_movies // 100)
-    yield_interval = max(1, min(500, total_movies // 200))
-    for i, plex_movie in enumerate(plex_movies):
-        if i % yield_interval == 0:
-            await asyncio.sleep(0)
-            if engine.is_cancelled():
-                return False
-        if i % update_interval == 0:
-            engine.progress(3, 4, 25 + (i / total_movies) * 20, f"Movies {i}/{total_movies}")
-
-        plex_ids = extract_plex_ids(plex_movie)
-        keys = id_keys(plex_ids, MOVIE_ID_TYPES)
-        if not keys or (not fixing and any(key in collected_movies for key in keys)):
-            continue
-        # the same movie in several libraries is collected once, from its best copy
-        slot = next((slots[key] for key in keys if key in slots), keys[0])
-        for key in keys:
-            slots.setdefault(key, slot)
-        score, media = best_media(plex_movie)
-        if slot in best and best[slot][0] >= score:
-            continue
-        movie = trakt_item(plex_movie, plex_ids, MOVIE_ID_TYPES) or {}
-        movie.update(extract_media_metadata(media))
-        collected_at = plex_dt_to_utc_iso(getattr(plex_movie, "addedAt", None))
-        if collected_at:
-            movie["collected_at"] = collected_at
-        best[slot] = (score, movie)
-    movies_to_collect = [movie for _, movie in best.values()]
+    # fixing dates resends what Trakt already has
+    collected_movies, collected_episodes = (
+        (set(), set()) if fixing else _collected_keys(trakt_collection_movies, trakt_collection_shows)
+    )
+    movies_to_collect = await _movies_to_collect(engine, plex_movies, collected_movies)
     engine.plex_cache.clear()
-    del plex_movies, best
-
-    show_info = {str(show.ratingKey): (extract_plex_ids(show), show.title, show.year) for show in plex_shows}
-    rows: list[tuple[dict, int, dict, str]] = []
-    shows_seen: set[tuple] = set()
-    seen: set[tuple] = set()
-    skipped_no_number = 0
-    total_episodes = len(plex_episodes)
-    update_interval = max(1, total_episodes // 100)
-    yield_interval = max(1, min(500, total_episodes // 200))
-    for i, episode in enumerate(plex_episodes):
-        if i % yield_interval == 0:
-            await asyncio.sleep(0)
-            if engine.is_cancelled():
-                return False
-        if i % update_interval == 0:
-            engine.progress(3, 4, 45 + (i / total_episodes) * 30, f"Episodes {i}/{total_episodes}")
-
-        info = show_info.get(str(episode.grandparentRatingKey))
-        keys = id_keys(info[0], SHOW_ID_TYPES) if info else []
-        if not info or not keys:
-            continue
-        season, number = episode.parentIndex, episode.index
-        if season is None or number is None:
-            skipped_no_number += 1
-            continue
-        ep_keys = [(key, season, number) for key in keys]
-        if any(k in seen for k in ep_keys) or (not fixing and any(k in collected_episodes for k in ep_keys)):
-            continue
-        seen.update(ep_keys)
-        shows_seen.add(keys[0])
-        entry: dict[str, Any] = {"number": number}
-        collected_at = plex_dt_to_utc_iso(getattr(episode, "addedAt", None))
-        if collected_at:
-            entry["collected_at"] = collected_at
-        _, title, year = info
-        rows.append(({"title": title, "year": year, "ids": dict(keys)}, season, entry, ""))
-    del plex_episodes, plex_shows, show_info
+    del plex_movies
+    if engine.is_cancelled():
+        return False
+    rows, show_count, unnumbered = await _episodes_to_collect(engine, plex_shows, plex_episodes, collected_episodes)
+    del plex_episodes, plex_shows
     gc.collect()
+    if engine.is_cancelled():
+        return False
 
     shows_to_collect = group_by_show(rows)
-    if skipped_no_number:
-        logger.warning(
-            f"Collection: skipped {report.plural(skipped_no_number, 'episode')} without a season or episode number"
-        )
-    sending = [report.plural(len(movies_to_collect), "movie")] if movies_to_collect else []
-    if rows:
-        sending.append(f"{report.plural(len(rows), 'episode')} of {report.plural(len(shows_seen), 'show')}")
-    if not sending:
-        planned = "no changes"
-    elif fixing:
-        planned = f"re-sending {' and '.join(sending)} with Plex dates"
-    else:
-        planned = f"Trakt +{', +'.join(sending)}"
+    if unnumbered:
+        logger.warning(f"Collection: skipped {report.plural(unnumbered, 'episode')} without a season or episode number")
+    planned = _describe(movies_to_collect, len(rows), show_count, fixing)
     logger.info(f"Collection: {planned} ({report.duration(time.time() - phase_start)})")
-
     if engine.verbose:
-        for m in movies_to_collect:
-            added = f", added {m['collected_at'][:10]}" if m.get("collected_at") else ""
-            report.item(f"Trakt collected: {report.title(m)}{added}")
-        for show in shows_to_collect:
-            codes = [f"S{s['number']:02d}E{e['number']:02d}" for s in show["seasons"] for e in s["episodes"]]
-            listed = ", ".join(codes[:5]) + (f" and {len(codes) - 5} more" if len(codes) > 5 else "")
-            report.item(f"Trakt collected: {show['title']} {listed}")
+        _list_items(movies_to_collect, shows_to_collect)
 
     if not dry_run:
         engine.progress(3, 4, 80, "Adding to Trakt collection")
