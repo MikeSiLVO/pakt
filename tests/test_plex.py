@@ -50,6 +50,23 @@ def test_metadata_scores_resolution_then_hdr_then_audio_then_channels():
     assert scores == sorted(scores, reverse=True) and len(set(scores)) == len(scores) and scores[-1] == 0
 
 
+@pytest.mark.parametrize("codec, profile, channels, audio, layout", [
+    ("truehd", "dolby truehd + dolby atmos", 8, "dolby_atmos", "7.1"),
+    ("eac3", "dolby digital plus + dolby atmos", 6, "dolby_digital_plus_atmos", "5.1"),
+    ("dca", "ma + dts:x imax", 8, "dts_x", "7.1"),
+    ("dca-ma", "ma", 6, "dts_ma", "5.1"),
+    ("dca", "hra", 6, "dts_hr", "5.1"),
+    ("dca", "es", 7, "dts", "6.1"),
+    ("ac3", None, 2, "dolby_digital", "2.0"),
+])
+def test_audio_comes_from_the_version_codec_and_profile(codec, profile, channels, audio, layout):
+    """A version with no streams listed still tells Atmos, DTS:X and DTS-HD apart."""
+    version = SimpleNamespace(videoResolution="1080", audioCodec=codec, audioProfile=profile,
+                              audioChannels=channels, parts=[])
+    metadata = media.extract_media_metadata(version)
+    assert (metadata.get("audio"), metadata.get("audio_channels")) == (audio, layout)
+
+
 def test_unsupported_agent_gives_no_ids():
     """An agent Trakt cannot match, such as HAMA, yields no ids."""
     ids = media.extract_plex_ids(item("com.plexapp.agents.hama://anidb-1"))

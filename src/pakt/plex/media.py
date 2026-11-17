@@ -11,7 +11,6 @@ from pakt.models import PlexIds
 
 LEGACY_GUID = re.compile(r"^com\.plexapp\.agents\.(imdb|themoviedb|thetvdb)://([^/?]+)")
 VIDEO_STREAM = 1
-AUDIO_STREAM = 2
 
 RESOLUTION_MAP = {
     "4k": "uhd_4k",
@@ -44,10 +43,9 @@ AUDIO_CODEC_MAP = {
     "truehd": "dolby_truehd",
     "eac3": "dolby_digital_plus",
     "ac3": "dolby_digital",
-    "dca": "dts",  # DTS core
+    "dca": "dts",
+    "dca-ma": "dts_ma",
     "dts": "dts",
-    "dts-hd ma": "dts_ma",
-    "dts-hd hra": "dts_hr",
     "aac": "aac",
     "flac": "flac",
     "pcm": "lpcm",
@@ -56,6 +54,16 @@ AUDIO_CODEC_MAP = {
     "vorbis": "ogg",
     "opus": "ogg_opus",
     "wma": "wma",
+}
+
+ATMOS_CODECS = {
+    "truehd": "dolby_atmos",
+    "eac3": "dolby_digital_plus_atmos",
+}
+
+DTS_PROFILES = {
+    "ma": "dts_ma",
+    "hra": "dts_hr",
 }
 
 AUDIO_RANK = {
@@ -118,57 +126,18 @@ def _detect_hdr_type(video_stream) -> str | None:
     return None
 
 
-def _detect_audio_codec(media, audio_stream) -> str | None:
-    """Detect audio codec and check for Atmos/DTS:X."""
-    codec = getattr(media, "audioCodec", None)
-    if not codec:
-        return None
-
-    codec = codec.lower()
-
-    if audio_stream:
-        display_title = getattr(audio_stream, "displayTitle", "") or ""
-        extended_display_title = getattr(audio_stream, "extendedDisplayTitle", "") or ""
-        combined = f"{display_title} {extended_display_title}".lower()
-
-        if "atmos" in combined:
-            if codec == "truehd":
-                return "dolby_atmos"
-            elif codec == "eac3":
-                return "dolby_digital_plus_atmos"
-
-        if "dts:x" in combined or "dts-x" in combined:
+def _detect_audio_codec(media) -> str | None:
+    """Detect a version's audio codec, telling Atmos, DTS:X and DTS-HD apart by its profile."""
+    codec = (getattr(media, "audioCodec", None) or "").lower()
+    profile = (getattr(media, "audioProfile", None) or "").lower()
+    if "atmos" in profile and codec in ATMOS_CODECS:
+        return ATMOS_CODECS[codec]
+    if codec.startswith("dca"):
+        if "dts:x" in profile:
             return "dts_x"
-
+        if profile in DTS_PROFILES:
+            return DTS_PROFILES[profile]
     return AUDIO_CODEC_MAP.get(codec)
-
-
-def _detect_audio_channels(media, audio_stream) -> str | None:
-    """Detect audio channel layout, including Atmos and DTS:X height channels."""
-    channels = getattr(media, "audioChannels", None)
-    if not channels:
-        return None
-
-    if audio_stream:
-        channel_layout = getattr(audio_stream, "audioChannelLayout", "") or ""
-        display_title = getattr(audio_stream, "displayTitle", "") or ""
-        combined = f"{channel_layout} {display_title}".lower()
-
-        if "atmos" in combined or "dts:x" in combined:
-            if channels >= 8:
-                if "7.1.4" in combined:
-                    return "7.1.4"
-                elif "7.1.2" in combined:
-                    return "7.1.2"
-                return "7.1"
-            elif channels >= 6:
-                if "5.1.4" in combined:
-                    return "5.1.4"
-                elif "5.1.2" in combined:
-                    return "5.1.2"
-                return "5.1"
-
-    return CHANNELS_MAP.get(channels)
 
 
 def metadata_score(metadata: dict) -> int:
@@ -208,12 +177,11 @@ def extract_media_metadata(media: Any) -> dict:
     if hdr_type:
         metadata["hdr"] = hdr_type
 
-    audio_stream = _get_stream(media, AUDIO_STREAM)
-    audio_codec = _detect_audio_codec(media, audio_stream)
+    audio_codec = _detect_audio_codec(media)
     if audio_codec:
         metadata["audio"] = audio_codec
 
-    audio_channels = _detect_audio_channels(media, audio_stream)
+    audio_channels = CHANNELS_MAP.get(getattr(media, "audioChannels", None) or 0)
     if audio_channels:
         metadata["audio_channels"] = audio_channels
 
