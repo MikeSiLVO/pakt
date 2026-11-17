@@ -225,6 +225,6 @@ To access the web UI from other devices:
 
 Then access via your machine's IP address.
 
-From another device the web UI asks for the password set with `pakt password`, and stays closed
-until one is set. On the same machine it opens without one, except through a reverse proxy or Docker.
-The password travels in plain HTTP unless a reverse proxy adds HTTPS.
+From another device the web UI asks for the password set with `pakt password`, and stays closed until one is set. On the same machine it opens without one, except through a reverse proxy or Docker. The password travels in plain HTTP unless a reverse proxy adds HTTPS.
+
+A reverse proxy on the same machine must send the visitor's address in `X-Forwarded-For` or pass on their Host header (nginx: `proxy_set_header Host $host;`). Without either, everyone who reaches the web UI through it gets in without the password.
