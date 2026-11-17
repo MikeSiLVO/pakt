@@ -15,13 +15,18 @@ router = APIRouter()
 @router.post("/api/trakt/auth")
 async def start_trakt_auth(request: Request) -> dict[str, Any]:
     """Start a Trakt device login, replacing any pending one, and return the code to enter."""
+    import httpx
+
     from pakt.trakt import TraktClient
 
     config = Config.load()
     if not config.trakt.client_id:
         return {"error": "Trakt client_id not configured"}
 
-    device = await TraktClient(config.trakt).device_code()
+    try:
+        device = await TraktClient(config.trakt).device_code()
+    except httpx.HTTPError as e:
+        return {"error": f"Could not reach Trakt: {e}"}
     pending: dict[str, Any] = request.app.state.trakt_device
     pending.clear()
     pending.update(device)

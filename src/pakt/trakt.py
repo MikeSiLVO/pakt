@@ -514,9 +514,12 @@ class TraktClient:
         if not self.config.access_token:
             return True
 
-        async with self._auth_client() as client:
-            response = await client.post(
-                "/oauth/revoke",
-                json={"token": self.config.access_token, "client_id": self.config.client_id},
-            )
-            return response.status_code == 200
+        try:
+            async with self._auth_client() as client:
+                response = await client.post(
+                    "/oauth/revoke",
+                    json={"token": self.config.access_token, "client_id": self.config.client_id},
+                )
+        except httpx.HTTPError:
+            return False
+        return response.status_code == 200

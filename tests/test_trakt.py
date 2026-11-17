@@ -245,6 +245,19 @@ async def test_unexpected_refresh_reply_keeps_the_token(auth_requests):
     assert client.config.access_token == "old" and saved == []
 
 
+async def test_revoke_without_a_connection_reports_failure(monkeypatch):
+    """A revoke that cannot reach Trakt returns False instead of raising."""
+    def auth_client(self, timeout=30.0):
+        """Build an OAuth client whose every request fails to connect."""
+        def refuse(request):
+            raise httpx.ConnectError("offline")
+
+        return httpx.AsyncClient(base_url=trakt.TRAKT_AUTH_URL, transport=httpx.MockTransport(refuse))
+
+    monkeypatch.setattr(trakt.TraktClient, "_auth_client", auth_client)
+    assert await trakt.TraktClient(TraktConfig(access_token="t")).revoke_token() is False
+
+
 async def test_revoke_goes_to_the_auth_host_without_secret(auth_requests):
     """Logout revokes on auth.trakt.tv with the client ID and no bearer or secret."""
     seen, _ = auth_requests

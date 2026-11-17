@@ -89,15 +89,10 @@ def logout():
 
     async def do_logout():
         """Revoke the token on Trakt, then clear it locally either way."""
-        import httpx
-
         from pakt.trakt import TraktClient
 
         console.print("[cyan]Revoking Trakt access token...[/]")
-        try:
-            success = await TraktClient(config.trakt).revoke_token()
-        except httpx.HTTPError:
-            success = False
+        success = await TraktClient(config.trakt).revoke_token()
 
         if success:
             console.print("[green]Token revoked successfully.[/]")
