@@ -84,24 +84,12 @@ CHANNELS_MAP = {
 }
 
 
-def _get_video_stream(media) -> object | None:
-    """Get the primary video stream from media."""
+def _get_stream(media, stream_type: int) -> object | None:
+    """Get the first stream of a type across the media's parts, or None."""
     try:
         for part in media.parts:
             for stream in part.streams:
-                if stream.streamType == VIDEO_STREAM:
-                    return stream
-    except (AttributeError, TypeError):
-        pass
-    return None
-
-
-def _get_audio_stream(media) -> object | None:
-    """Get the primary audio stream from media."""
-    try:
-        for part in media.parts:
-            for stream in part.streams:
-                if stream.streamType == AUDIO_STREAM:
+                if stream.streamType == stream_type:
                     return stream
     except (AttributeError, TypeError):
         pass
@@ -193,13 +181,11 @@ def _score_media(media) -> int:
         trakt_res = RESOLUTION_MAP.get(resolution.lower(), "sd_480p")
         score += RESOLUTION_RANK.get(trakt_res, 1) * 1000
 
-    video_stream = _get_video_stream(media)
-    hdr_type = _detect_hdr_type(video_stream)
+    hdr_type = _detect_hdr_type(_get_stream(media, VIDEO_STREAM))
     if hdr_type:
         score += HDR_RANK.get(hdr_type, 0) * 100
 
-    audio_stream = _get_audio_stream(media)
-    audio_codec = _detect_audio_codec(media, audio_stream)
+    audio_codec = _detect_audio_codec(media, _get_stream(media, AUDIO_STREAM))
     if audio_codec:
         score += AUDIO_RANK.get(audio_codec, 0) * 10
 
@@ -209,7 +195,7 @@ def _score_media(media) -> int:
     return score
 
 
-def _best_media(item: Movie | Episode) -> tuple[int, Any]:
+def best_media(item: Movie | Episode) -> tuple[int, Any]:
     """Highest scoring media version of an item with its score, or (-1, None) when it has none."""
     best: tuple[int, Any] = (-1, None)
     for media in getattr(item, "media", None) or []:
@@ -219,36 +205,29 @@ def _best_media(item: Movie | Episode) -> tuple[int, Any]:
     return best
 
 
-def media_score(item: Movie | Episode) -> int:
-    """Quality score of an item's best media version, -1 when it has none."""
-    return _best_media(item)[0]
-
-
-def extract_media_metadata(item: Movie | Episode) -> dict:
-    """Extract metadata of the item's best media version for the Trakt collection."""
-    best_media = _best_media(item)[1]
-    if best_media is None:
+def extract_media_metadata(media: Any) -> dict:
+    """Extract a media version's metadata for the Trakt collection, empty for None."""
+    if media is None:
         return {}
 
     metadata: dict = {"media_type": "digital"}
 
-    resolution = getattr(best_media, "videoResolution", None)
+    resolution = getattr(media, "videoResolution", None)
     if resolution:
         trakt_res = RESOLUTION_MAP.get(resolution.lower())
         if trakt_res:
             metadata["resolution"] = trakt_res
 
-    video_stream = _get_video_stream(best_media)
-    hdr_type = _detect_hdr_type(video_stream)
+    hdr_type = _detect_hdr_type(_get_stream(media, VIDEO_STREAM))
     if hdr_type:
         metadata["hdr"] = hdr_type
 
-    audio_stream = _get_audio_stream(best_media)
-    audio_codec = _detect_audio_codec(best_media, audio_stream)
+    audio_stream = _get_stream(media, AUDIO_STREAM)
+    audio_codec = _detect_audio_codec(media, audio_stream)
     if audio_codec:
         metadata["audio"] = audio_codec
 
-    audio_channels = _detect_audio_channels(best_media, audio_stream)
+    audio_channels = _detect_audio_channels(media, audio_stream)
     if audio_channels:
         metadata["audio_channels"] = audio_channels
 

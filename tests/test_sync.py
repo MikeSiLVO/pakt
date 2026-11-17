@@ -151,16 +151,16 @@ def test_watched_index_skips_unwatched_progress_entries():
     assert (("tvdb", 1), 1, 2) not in index
 
 
-def run_episodes(plex_episodes, watched=frozenset(), ratings=None, pushed=None, cancel=False):
-    """Run the episode worker over one show with TVDB id 1."""
+def run_episodes(plex_episodes, watched=frozenset(), ratings=None, pushed=None, cancel=False, shows=None):
+    """Run the episode worker, by default over one show with TVDB id 1."""
     event = threading.Event()
     if cancel:
         event.set()
     options = {k: True for k in ("watched_plex_to_trakt", "watched_trakt_to_plex",
                                  "ratings_plex_to_trakt", "ratings_trakt_to_plex")}
     return episodes.process_in_thread(
-        plex_episodes, {"s1": PlexIds(plex="s1", tvdb=1)}, set(watched), ratings or {}, options, "none", event,
-        pushed or PushedToTrakt(),
+        plex_episodes, shows or {"s1": PlexIds(plex="s1", tvdb=1)}, set(watched), ratings or {}, options, "none",
+        event, pushed or PushedToTrakt(),
     )
 
 
@@ -182,6 +182,15 @@ def test_episode_worker_skips_items_another_server_sent():
     assert not run_episodes([plex_episode("s1", 1, 1, watched=True)], pushed=pushed).watched_to_trakt
 
 
+def test_episode_worker_matches_copies_on_any_shared_id():
+    """Copies of a show carrying different id sets queue a play once, here and on a later server."""
+    shows = {"s1": PlexIds(plex="s1", tvdb=1, tmdb=5), "s2": PlexIds(plex="s2", tmdb=5)}
+    copies = [plex_episode("s1", 1, 1, watched=True), plex_episode("s2", 1, 1, watched=True)]
+    assert len(run_episodes(copies, shows=shows).watched_to_trakt) == 1
+    pushed = PushedToTrakt(watched_episodes={(("tmdb", 5), 1, 1)})
+    assert not run_episodes(copies[:1], shows=shows, pushed=pushed).watched_to_trakt
+
+
 def test_episode_worker_counts_episodes_it_cannot_place():
     """Episodes without a show id or a season or episode number are counted by show, not fatal."""
     result = run_episodes([plex_episode("unknown", 1, 1), plex_episode("s1", None, 1), plex_episode("s1", 1, None)])
@@ -200,6 +209,42 @@ async def test_second_copy_of_a_movie_still_reaches_trakt():
     result = await run_movies(trakt, plex)
     assert trakt.posts[0] == ("history", {"movies": [{"title": "Movie", "year": 2000, "ids": {"imdb": "tt1"}}]})
     assert result.added_to_trakt == 1
+
+
+def movie_copies():
+    """One movie twice: a copy with IMDb and TMDB GUIDs, and a legacy agent copy with TMDB only."""
+    modern = plex_movie("tt1", watched=True)
+    modern.guids.append(SimpleNamespace(id="tmdb://603"))
+    legacy = plex_movie("legacy", watched=True)
+    legacy.guid, legacy.guids = "com.plexapp.agents.themoviedb://603?lang=en", []
+    return modern, legacy
+
+
+async def test_movie_copies_with_different_ids_post_one_play():
+    """Copies sharing any id post one play, in one library or across two servers."""
+    modern, legacy = movie_copies()
+    trakt = FakeTrakt()
+    await run_movies(trakt, FakePlex([modern, legacy]))
+    assert [len(lists["movies"]) for _, lists in trakt.posts] == [1]
+
+    trakt, pushed = FakeTrakt(), PushedToTrakt()
+    await run_movies(trakt, FakePlex([legacy]), pushed=pushed)
+    await run_movies(trakt, FakePlex([modern]), pushed=pushed)
+    assert len(trakt.posts) == 1
+
+
+async def test_failed_history_post_still_counts_as_sent():
+    """Items of a history post that failed are still recorded as sent for later servers."""
+    trakt, pushed = FakeTrakt(), PushedToTrakt()
+
+    async def gateway_error(**lists):
+        """Fail as a post does after its retries."""
+        raise RuntimeError("502")
+
+    trakt.add_to_history = gateway_error
+    with pytest.raises(RuntimeError):
+        await run_movies(trakt, FakePlex([plex_movie("tt1", watched=True)]), pushed=pushed)
+    assert pushed.watched_movies == {("imdb", "tt1")}
 
 
 async def test_movie_watched_on_trakt_is_marked_on_every_plex_copy():

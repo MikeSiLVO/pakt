@@ -117,36 +117,34 @@ def process_in_thread(
             result.skipped_no_number[show_title] += 1
             continue
 
-        ep_key = (keys[0], season, number)
+        ep_keys = [(key, season, number) for key in keys]
         label = f"{show_title} S{season:02d}E{number:02d}"
         show = {"ids": dict(keys)}
 
-        trakt_has_watch = any((key, season, number) in trakt_watched for key in keys)
+        trakt_has_watch = any(key in trakt_watched for key in ep_keys)
         if plex_watched and not trakt_has_watch:
-            if (options["watched_plex_to_trakt"] and ep_key not in pushed.watched_episodes
-                    and ep_key not in result.watched_keys):
+            if (options["watched_plex_to_trakt"]
+                    and not any(key in pushed.watched_episodes or key in result.watched_keys for key in ep_keys)):
                 entry: dict[str, Any] = {"number": number}
                 if watched_at:
                     entry["watched_at"] = watched_at
                 result.watched_to_trakt.append((show, season, entry, label))
-                result.watched_keys.add(ep_key)
+                result.watched_keys.update(ep_keys)
         elif trakt_has_watch and not plex_watched and options["watched_trakt_to_plex"]:
             result.watched_to_plex.append((episode, label))
 
         plex_rating_int = int(plex_rating) if plex_rating else None
-        trakt_rating = next(
-            (trakt_ratings[(key, season, number)] for key in keys if (key, season, number) in trakt_ratings), None
-        )
+        trakt_rating = next((trakt_ratings[key] for key in ep_keys if key in trakt_ratings), None)
         send, fetch = rating_direction(
             plex_rating_int, trakt_rating, rating_priority,
             options["ratings_plex_to_trakt"], options["ratings_trakt_to_plex"],
         )
-        if send and ep_key not in pushed.rated_episodes and ep_key not in result.rated_keys:
+        if send and not any(key in pushed.rated_episodes or key in result.rated_keys for key in ep_keys):
             entry = {"number": number, "rating": plex_rating_int}
             if rated_at:
                 entry["rated_at"] = rated_at
             result.rated_to_trakt.append((show, season, entry, f"{label} = {plex_rating_int}"))
-            result.rated_keys.add(ep_key)
+            result.rated_keys.update(ep_keys)
         elif fetch and trakt_rating is not None:
             result.rated_to_plex.append((episode, trakt_rating, f"{label} = {trakt_rating}"))
 
@@ -244,21 +242,18 @@ async def run(engine: SyncEngine, result: SyncResult, dry_run: bool) -> bool:
         for *_, label in ep_result.rated_to_plex:
             report.item(f"Plex rated: {label}")
 
-    pushed = engine.pushed
+    engine.pushed.watched_episodes |= ep_result.watched_keys
+    engine.pushed.rated_episodes |= ep_result.rated_keys
     if not dry_run:
         engine.progress(2, 4, 90, "Applying episode changes")
         response = await engine.push(
             "history", engine.trakt.add_to_history, shows=group_by_show(ep_result.watched_to_trakt),
         )
         result.added_to_trakt += response.get("added", {}).get("episodes", 0)
-    pushed.watched_episodes |= ep_result.watched_keys
-    if not dry_run:
         response = await engine.push(
             "ratings", engine.trakt.add_ratings, shows=group_by_show(ep_result.rated_to_trakt),
         )
         result.ratings_to_trakt += response.get("added", {}).get("episodes", 0)
-    pushed.rated_episodes |= ep_result.rated_keys
-    if not dry_run:
         result.added_to_plex += await engine.write_plex(
             "episodes marked watched", engine.plex.mark_watched_batch,
             [ep for ep, _ in ep_result.watched_to_plex], result,

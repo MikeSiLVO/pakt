@@ -78,19 +78,18 @@ async def run(engine: SyncEngine, result: SyncResult, dry_run: bool) -> bool:
             if not keys:
                 no_ids.append(f"{plex_movie.title} ({plex_movie.year})")
                 continue
-            movie_key = keys[0]
             trakt_watched = any(key in watched_keys for key in keys)
             trakt_rating = next((rating_by_key[key] for key in keys if key in rating_by_key), None)
 
             if plex_movie.isWatched and not trakt_watched:
-                if (options["watched_plex_to_trakt"] and movie_key not in pushed.watched_movies
-                        and movie_key not in queued_watched):
+                if (options["watched_plex_to_trakt"]
+                        and not any(key in pushed.watched_movies or key in queued_watched for key in keys)):
                     movie = trakt_item(plex_movie, plex_ids, MOVIE_ID_TYPES) or {}
                     watched_at = plex_dt_to_utc_iso(plex_movie.lastViewedAt)
                     if watched_at:
                         movie["watched_at"] = watched_at
                     to_trakt_watched.append(movie)
-                    queued_watched.add(movie_key)
+                    queued_watched.update(keys)
             elif trakt_watched and not plex_movie.isWatched and options["watched_trakt_to_plex"]:
                 to_plex_watched.append(plex_movie)
 
@@ -99,14 +98,14 @@ async def run(engine: SyncEngine, result: SyncResult, dry_run: bool) -> bool:
                 plex_rating, trakt_rating, priority,
                 options["ratings_plex_to_trakt"], options["ratings_trakt_to_plex"],
             )
-            if send and movie_key not in pushed.rated_movies and movie_key not in queued_rated:
+            if send and not any(key in pushed.rated_movies or key in queued_rated for key in keys):
                 movie = trakt_item(plex_movie, plex_ids, MOVIE_ID_TYPES) or {}
                 movie["rating"] = plex_rating
                 rated_at = plex_dt_to_utc_iso(plex_movie.lastRatedAt)
                 if rated_at:
                     movie["rated_at"] = rated_at
                 to_trakt_rated.append(movie)
-                queued_rated.add(movie_key)
+                queued_rated.update(keys)
             elif fetch and trakt_rating is not None:
                 to_plex_rated.append((plex_movie, trakt_rating))
         progress.update(task, completed=total_movies, description=f"Movies {total_movies}/{total_movies}")
@@ -134,16 +133,15 @@ async def run(engine: SyncEngine, result: SyncResult, dry_run: bool) -> bool:
         for m, rating in to_plex_rated:
             report.item(f"Plex rated: {m.title} ({m.year}) = {rating}")
 
+    # marked before the push, which can land in part and still fail
+    pushed.watched_movies |= queued_watched
+    pushed.rated_movies |= queued_rated
     if not dry_run:
         engine.progress(1, 4, 75, "Applying movie changes")
         response = await engine.push("history", engine.trakt.add_to_history, movies=to_trakt_watched)
         result.added_to_trakt += response.get("added", {}).get("movies", 0)
-    pushed.watched_movies |= queued_watched
-    if not dry_run:
         response = await engine.push("ratings", engine.trakt.add_ratings, movies=to_trakt_rated)
         result.ratings_to_trakt += response.get("added", {}).get("movies", 0)
-    pushed.rated_movies |= queued_rated
-    if not dry_run:
         result.added_to_plex += await engine.write_plex(
             "movies marked watched", engine.plex.mark_watched_batch, to_plex_watched, result,
         )

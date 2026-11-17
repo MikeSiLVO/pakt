@@ -9,7 +9,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from pakt.models import SyncResult
-from pakt.plex.media import extract_media_metadata, extract_plex_ids, media_score
+from pakt.plex.media import best_media, extract_media_metadata, extract_plex_ids
 from pakt.sync import report
 from pakt.sync.match import MOVIE_ID_TYPES, SHOW_ID_TYPES, group_by_show, id_keys, plex_dt_to_utc_iso, trakt_item
 from pakt.trakt import TraktAccountLimitError
@@ -76,6 +76,7 @@ async def run(engine: SyncEngine, result: SyncResult, dry_run: bool,
 
     fixing = engine.fix_collection_dates
     best: dict[tuple, tuple[int, dict]] = {}
+    slots: dict[tuple, tuple] = {}
     total_movies = len(plex_movies)
     update_interval = max(1, total_movies // 100)
     yield_interval = max(1, min(500, total_movies // 200))
@@ -92,15 +93,18 @@ async def run(engine: SyncEngine, result: SyncResult, dry_run: bool,
         if not keys or (not fixing and any(key in collected_movies for key in keys)):
             continue
         # the same movie in several libraries is collected once, from its best copy
-        score = media_score(plex_movie)
-        if keys[0] in best and best[keys[0]][0] >= score:
+        slot = next((slots[key] for key in keys if key in slots), keys[0])
+        for key in keys:
+            slots.setdefault(key, slot)
+        score, media = best_media(plex_movie)
+        if slot in best and best[slot][0] >= score:
             continue
         movie = trakt_item(plex_movie, plex_ids, MOVIE_ID_TYPES) or {}
-        movie.update(extract_media_metadata(plex_movie))
+        movie.update(extract_media_metadata(media))
         collected_at = plex_dt_to_utc_iso(getattr(plex_movie, "addedAt", None))
         if collected_at:
             movie["collected_at"] = collected_at
-        best[keys[0]] = (score, movie)
+        best[slot] = (score, movie)
     movies_to_collect = [movie for _, movie in best.values()]
     engine.plex_cache.clear()
     del plex_movies, best
@@ -129,10 +133,10 @@ async def run(engine: SyncEngine, result: SyncResult, dry_run: bool,
         if season is None or number is None:
             skipped_no_number += 1
             continue
-        ep_key = (keys[0], season, number)
-        if ep_key in seen or (not fixing and any((k, season, number) in collected_episodes for k in keys)):
+        ep_keys = [(key, season, number) for key in keys]
+        if any(k in seen for k in ep_keys) or (not fixing and any(k in collected_episodes for k in ep_keys)):
             continue
-        seen.add(ep_key)
+        seen.update(ep_keys)
         shows_seen.add(keys[0])
         entry: dict[str, Any] = {"number": number}
         collected_at = plex_dt_to_utc_iso(getattr(episode, "addedAt", None))
