@@ -87,7 +87,7 @@ class PaktTray:
         """Menu label showing when the next scheduled sync lands."""
         scheduler = self._scheduler()
         next_run = scheduler.next_run if scheduler else None
-        return f"Next sync: {next_run:%H:%M}" if next_run else ""
+        return f"Next sync: {next_run.astimezone():%H:%M}" if next_run else ""
 
     def _has_next_sync(self, _item: Any) -> bool:
         """Whether there is a scheduled run worth showing."""
