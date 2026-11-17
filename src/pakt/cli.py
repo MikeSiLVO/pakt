@@ -274,22 +274,23 @@ def libraries(server: str | None, movie: tuple[str, ...], show: tuple[str, ...],
     available_movie_libs, available_show_libs = available["movie"], available["show"]
 
     if movie or show or sync_all:
-        if sync_all:
-            server_config.movie_libraries = []
-            server_config.show_libraries = []
-            console.print("[green]✓[/] Set to sync all libraries")
-        else:
+        if not sync_all:
             invalid = [m for m in movie if m not in available_movie_libs]
             invalid += [s for s in show if s not in available_show_libs]
             if invalid:
                 console.print(f"[red]Error:[/] Unknown libraries: {', '.join(invalid)}. Nothing was changed.")
                 sys.exit(1)
-            if movie:
-                server_config.movie_libraries = list(movie)
-            if show:
-                server_config.show_libraries = list(show)
 
-        config.save()
+        def select(current: Config) -> None:
+            target = current.get_server(server_config.name)
+            if target and (sync_all or movie):
+                target.movie_libraries = [] if sync_all else list(movie)
+            if target and (sync_all or show):
+                target.show_libraries = [] if sync_all else list(show)
+
+        config.save_change(select)
+        if sync_all:
+            console.print("[green]✓[/] Set to sync all libraries")
         console.print("[green]✓[/] Configuration saved")
         console.print()
 
@@ -414,18 +415,12 @@ def servers_add(name: str, url: str | None, server_token: str | None, disabled: 
 
     if config.get_server(name):
         console.print(f"[yellow]Server '{name}' already configured.[/]")
-        console.print("Use [cyan]pakt servers remove {name}[/] to remove it first.")
+        console.print(f"Use [cyan]pakt servers remove {name}[/] to remove it first.")
         return
 
     if url and server_token:
-        new_server = ServerConfig(
-            name=name,
-            url=url,
-            token=server_token,
-            enabled=not disabled,
-        )
-        config.servers.append(new_server)
-        config.save()
+        new_server = ServerConfig(name=name, url=url, token=server_token, enabled=not disabled)
+        config.save_change(lambda current: current.servers.append(new_server))
         console.print(f"[green]✓[/] Added server: {name}")
         return
 
@@ -440,12 +435,7 @@ def servers_add(name: str, url: str | None, server_token: str | None, disabled: 
         console.print(f"[red]Error discovering servers:[/] {e}")
         return
 
-    matching = None
-    for server in discovered:
-        if server.name.lower() == name.lower():
-            matching = server
-            break
-
+    matching = next((s for s in discovered if s.name.lower() == name.lower()), None)
     if not matching:
         console.print(f"[yellow]Server '{name}' not found in your account.[/]")
         console.print("\nAvailable servers:")
@@ -454,15 +444,8 @@ def servers_add(name: str, url: str | None, server_token: str | None, disabled: 
         console.print("\nOr use --url and --token for manual entry.")
         return
 
-    new_server = ServerConfig(
-        name=matching.name,
-        server_name=matching.name,
-        url=matching.best_connection_url or "",
-        token=matching.access_token,
-        enabled=not disabled,
-    )
-    config.servers.append(new_server)
-    config.save()
+    discovered_server = matching.to_config(enabled=not disabled)
+    config.save_change(lambda current: current.servers.append(discovered_server))
     console.print(f"[green]✓[/] Added server: {matching.name}")
 
 

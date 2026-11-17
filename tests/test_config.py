@@ -18,6 +18,22 @@ def test_config_files_are_private():
     assert (folder / "config.json").stat().st_mode & 0o777 == 0o600
 
 
+def test_saved_change_keeps_what_was_saved_since_the_load():
+    """A change saved from a long-held copy keeps a token another copy saved meanwhile."""
+    held = Config.load()
+    other = Config.load()
+    other.trakt.refresh_token = "rotated"
+    other.save()
+
+    def link(config: Config) -> None:
+        """Link a Plex account."""
+        config.plex_token = "plex"
+
+    held.save_change(link)
+    saved = Config.load()
+    assert saved.trakt.refresh_token == "rotated" and saved.plex_token == "plex" and held.plex_token == "plex"
+
+
 def test_save_leaves_no_temp_file():
     """A save swaps the new file in and leaves nothing beside it."""
     Config().save()

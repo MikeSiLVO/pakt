@@ -85,7 +85,7 @@ async def get_servers() -> dict[str, Any]:
 
 
 @router.post("/api/servers")
-async def add_server(request: ServerCreate) -> dict[str, Any]:
+def add_server(request: ServerCreate) -> dict[str, Any]:
     """Add a Plex server, found through the account or entered by hand."""
     from pakt.plex.account import discover_servers
 
@@ -95,12 +95,7 @@ async def add_server(request: ServerCreate) -> dict[str, Any]:
         return {"status": "error", "message": f"Server '{request.name}' already exists"}
 
     if request.url and request.token:
-        new_server = ServerConfig(
-            name=request.name,
-            url=request.url,
-            token=request.token,
-            enabled=True,
-        )
+        new_server = ServerConfig(name=request.name, url=request.url, token=request.token, enabled=True)
     elif request.server_name:
         if not config.plex_token:
             return {"status": "error", "message": "No account token for discovery"}
@@ -114,18 +109,11 @@ async def add_server(request: ServerCreate) -> dict[str, Any]:
         if not matching:
             return {"status": "error", "message": f"Server '{request.server_name}' not found"}
 
-        new_server = ServerConfig(
-            name=request.name,
-            server_name=matching.name,
-            url=matching.best_connection_url or "",
-            token=matching.access_token,
-            enabled=True,
-        )
+        new_server = matching.to_config(request.name)
     else:
         return {"status": "error", "message": "Provide url+token or server_name"}
 
-    config.servers.append(new_server)
-    config.save()
+    config.save_change(lambda current: current.servers.append(new_server))
     state.invalidate_config_cache()
     return {"status": "ok", "message": f"Added server: {request.name}"}
 

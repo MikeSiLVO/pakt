@@ -46,9 +46,13 @@ def prompt_web_password(config: Config) -> None:
         if len(password) >= MIN_PASSWORD_LENGTH:
             break
         console.print(f"[yellow]Use at least {MIN_PASSWORD_LENGTH} characters.[/]")
-    config.web.password_hash = hash_password(password)
-    config.web.session_secret = secrets.token_urlsafe(32)
-    config.save()
+    password_hash, secret = hash_password(password), secrets.token_urlsafe(32)
+
+    def apply(current: Config) -> None:
+        current.web.password_hash = password_hash
+        current.web.session_secret = secret
+
+    config.save_change(apply)
     console.print("[green]✓[/] Password saved. Devices that were logged in must log in again.")
 
 
@@ -99,16 +103,18 @@ def setup_plex_manual(config: Config) -> None:
         libraries = plex.get_library_names()
         console.print(f"[green]✓[/] Libraries: {', '.join(libraries['movie'] + libraries['show'])}")
 
-        config.plex_token = plex_token
-        config.servers = [s for s in config.servers if s.name != server_config.name] + [server_config]
-        config.save()
+        def apply(current: Config) -> None:
+            current.plex_token = plex_token
+            current.servers = [s for s in current.servers if s.name != server_config.name] + [server_config]
+
+        config.save_change(apply)
     except Exception as e:
         console.print(f"[red]✗ Connection failed:[/] {e}")
         console.print("\n[yellow]Check your URL and token, then run 'pakt setup' again.[/]")
 
 
 def setup_plex_pin(config: Config) -> None:
-    """Set up Plex by PIN login, then add the servers picked from the account."""
+    """Set up Plex by PIN login, then add or update the servers picked from the account."""
     from pakt.plex.account import (
         check_plex_pin_login,
         discover_servers,
@@ -137,8 +143,10 @@ def setup_plex_pin(config: Config) -> None:
 
     console.print("\n[green]✓ Plex account linked![/]")
 
-    config.plex_token = account_token
-    config.save()
+    def link(current: Config) -> None:
+        current.plex_token = account_token
+
+    config.save_change(link)
 
     console.print("\n[dim]Discovering servers...[/]")
     try:
@@ -173,22 +181,20 @@ def setup_plex_pin(config: Config) -> None:
             selected_servers = [s for s in discovered if s.owned]
 
     for server in selected_servers:
-        existing = config.get_server(server.name)
-        if existing:
+        if config.get_server(server.name):
             console.print(f"  [dim]Server '{server.name}' already configured, updating...[/]")
-            existing.server_name = server.name
-            existing.url = server.best_connection_url or ""
-            existing.token = server.access_token
         else:
-            server_config = ServerConfig(
-                name=server.name,
-                server_name=server.name,
-                url=server.best_connection_url or "",
-                token=server.access_token,
-                enabled=True,
-            )
-            config.servers.append(server_config)
             console.print(f"  [green]✓[/] Added server: {server.name}")
 
-    config.save()
+    def add(current: Config) -> None:
+        for server in selected_servers:
+            existing = current.get_server(server.name)
+            if existing:
+                existing.server_name = server.name
+                existing.url = server.best_connection_url or ""
+                existing.token = server.access_token
+            else:
+                current.servers.append(server.to_config())
+
+    config.save_change(add)
     console.print(f"\n[green]✓ Configured {len(selected_servers)} server(s)[/]")

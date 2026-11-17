@@ -13,7 +13,7 @@ from plexapi.myplex import MyPlexAccount, MyPlexPinLogin, MyPlexResource
 from plexapi.server import PlexServer
 
 from pakt import __version__
-from pakt.config import Config
+from pakt.config import Config, ServerConfig
 
 
 class PlexAuthError(Exception):
@@ -108,6 +108,13 @@ class DiscoveredServer:
             not c.get("local"), bool(c.get("relay")), not str(c.get("uri") or "").startswith("https"),
         ))
         return ranked[0].get("uri") if ranked else None
+
+    def to_config(self, name: str | None = None, enabled: bool = True) -> ServerConfig:
+        """Build this server's config.json entry, named after the server unless a name is given."""
+        return ServerConfig(
+            name=name or self.name, server_name=self.name, url=self.best_connection_url or "",
+            token=self.access_token, enabled=enabled,
+        )
 
 
 def connect_resource(resource: MyPlexResource) -> PlexServer:

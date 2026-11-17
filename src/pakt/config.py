@@ -7,7 +7,7 @@ import logging
 import os
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from typing import Callable, Literal
 
 from pydantic import BaseModel, Field
 
@@ -185,17 +185,21 @@ class Config(BaseModel):
             pass  # Windows and some filesystems don't support it
         os.replace(temp_file, config_file)
 
+    def save_change(self, change: Callable[[Config], None], config_dir: Path | None = None) -> None:
+        """Save a change into a fresh read of config.json, and onto this copy."""
+        change(self)
+        current = Config.load(config_dir)
+        change(current)
+        current.save(config_dir)
+
     def save_trakt_token(self, token: dict, config_dir: Path | None = None) -> None:
         """Save Trakt tokens into a fresh read of config.json, and onto this copy."""
-        self.trakt.access_token = token["access_token"]
-        self.trakt.refresh_token = token["refresh_token"]
-        self.trakt.expires_at = token["created_at"] + token["expires_in"]
+        def apply(config: Config) -> None:
+            config.trakt.access_token = token["access_token"]
+            config.trakt.refresh_token = token["refresh_token"]
+            config.trakt.expires_at = token["created_at"] + token["expires_in"]
 
-        current = Config.load(config_dir)
-        current.trakt.access_token = self.trakt.access_token
-        current.trakt.refresh_token = self.trakt.refresh_token
-        current.trakt.expires_at = self.trakt.expires_at
-        current.save(config_dir)
+        self.save_change(apply, config_dir)
 
 
 def _migrate_legacy_config(config_dir: Path) -> Config | None:
