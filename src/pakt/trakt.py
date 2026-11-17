@@ -28,6 +28,7 @@ TOKEN_REFRESH_THRESHOLD = 24 * 60 * 60
 # Trakt allows one authenticated write per second
 WRITE_INTERVAL = 1.0
 
+RETRIES = 3
 RETRY_STATUSES = {429, 502, 503, 504, 520, 521, 522}
 
 # items per sync POST; a show entry can carry hundreds of episodes
@@ -213,30 +214,26 @@ class TraktClient:
             await asyncio.sleep(wait)
         self._last_write = time.monotonic()
 
-    async def _request(
-        self,
-        method: str,
-        path: str,
-        retries: int = 3,
-        **kwargs,
-    ) -> httpx.Response:
-        """Make a request, pacing writes and retrying rate limits, 5xx and dropped connections."""
+    async def _request(self, method: str, path: str, resend: bool = True, **kwargs) -> httpx.Response:
+        """Make a request, pacing writes and retrying; unsafe ones retry only if unsent or 429."""
         if not self._client:
             raise RuntimeError("Client not initialized. Use async with.")
 
-        for attempt in range(retries):
+        for attempt in range(RETRIES):
+            last = attempt == RETRIES - 1
             if method != "GET":
                 await self._pace_write()
             try:
                 response = await self._client.request(method, path, **kwargs)
             except httpx.TransportError as e:
                 # pagination makes timeouts and dropped connections routine
-                if attempt == retries - 1:
+                unsent = isinstance(e, (httpx.ConnectError, httpx.ConnectTimeout))
+                if last or not (resend or unsent):
                     raise
                 wait = _retry_delay(None, attempt)
                 logger.warning(
                     f"Trakt connection error on {method} {path} ({type(e).__name__}), retrying in {wait:.0f}s "
-                    f"(attempt {attempt + 1} of {retries})"
+                    f"(attempt {attempt + 1} of {RETRIES})"
                 )
                 await asyncio.sleep(wait)
                 continue
@@ -244,7 +241,7 @@ class TraktClient:
             status = response.status_code
             if status in RETRY_STATUSES:
                 wait = _retry_delay(response, attempt)
-                if attempt == retries - 1:
+                if last or not (resend or status == 429):
                     if status == 429:
                         raise TraktRateLimitError(int(wait))
                     response.raise_for_status()
@@ -252,7 +249,7 @@ class TraktClient:
                 bucket = f", {response.headers['X-Ratelimit']}" if "X-Ratelimit" in response.headers else ""
                 logger.warning(
                     f"Trakt {reason} on {method} {path}{bucket}, retrying in {wait:.0f}s "
-                    f"(attempt {attempt + 1} of {retries})"
+                    f"(attempt {attempt + 1} of {RETRIES})"
                 )
                 await asyncio.sleep(wait)
                 continue
@@ -356,14 +353,14 @@ class TraktClient:
             list_item_limit=limits.get("list", {}).get("item_count", 100),
         )
 
-    async def _post_sync(self, path: str, **lists: list[dict] | None) -> dict[str, Any]:
+    async def _post_sync(self, path: str, resend: bool = True, **lists: list[dict] | None) -> dict[str, Any]:
         """POST sync items in batches Trakt handles comfortably, summing the responses."""
         total: dict[str, Any] = {}
         for key, items in lists.items():
             items = items or []
             size = BATCH_SIZES[key]
             for start in range(0, len(items), size):
-                response = await self._request("POST", path, json={key: items[start:start + size]})
+                response = await self._request("POST", path, resend, json={key: items[start:start + size]})
                 _merge_counts(total, response.json())
         return total
 
@@ -371,7 +368,8 @@ class TraktClient:
         self, movies: list[dict] | None = None, shows: list[dict] | None = None
     ) -> dict[str, Any]:
         """Add items to watch history."""
-        return await self._post_sync("/sync/history", movies=movies, shows=shows)
+        # every post adds plays, resent or not
+        return await self._post_sync("/sync/history", resend=False, movies=movies, shows=shows)
 
     async def add_ratings(
         self, movies: list[dict] | None = None, shows: list[dict] | None = None

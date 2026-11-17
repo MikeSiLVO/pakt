@@ -118,6 +118,38 @@ async def test_server_errors_retry_then_raise(sleeps, caplog):
     assert len(warnings) == 2 and warnings[0].startswith("Trakt HTTP 522 on GET /x, retrying in")
 
 
+def replying(*replies):
+    """Handler answering each reply in turn, raising errors, keeping each request it receives."""
+    queue = iter(replies)
+    calls: list[httpx.Request] = []
+
+    def handler(request):
+        """Record the request and answer or raise with the next reply."""
+        calls.append(request)
+        reply = next(queue)
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
+
+    return handler, calls
+
+
+@pytest.mark.parametrize("failure", [httpx.ReadTimeout("slow"), httpx.Response(502)])
+async def test_history_posts_are_not_resent_once_trakt_may_have_them(sleeps, failure):
+    """A history post that timed out or met a gateway error raises instead of posting twice."""
+    handler, calls = replying(failure)
+    with pytest.raises((httpx.ReadTimeout, httpx.HTTPStatusError)):
+        await api_client(handler).add_to_history(movies=[{}])
+    assert len(calls) == 1
+
+
+async def test_history_posts_retry_what_never_reached_trakt(sleeps):
+    """A refused connection or a rate limit on a history post is retried."""
+    handler, calls = replying(httpx.ConnectError("refused"), httpx.Response(429), httpx.Response(201, json={}))
+    assert await api_client(handler).add_to_history(movies=[{}]) == {}
+    assert len(calls) == 3
+
+
 @pytest.mark.parametrize("status, headers, error, text", [
     (401, {}, trakt.TraktAuthError, "pakt login"),
     (403, {}, trakt.TraktAuthError, "API key"),
