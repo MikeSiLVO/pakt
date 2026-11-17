@@ -115,10 +115,11 @@ def add_server(request: ServerCreate) -> dict[str, Any]:
 
     config.save_change(lambda current: current.servers.append(new_server))
     state.invalidate_config_cache()
+    state.drop_cached(f"plex_libraries_{request.name}")
     return {"status": "ok", "message": f"Added server: {request.name}"}
 
 
-@router.put("/api/servers/{name}")
+@router.put("/api/servers/{name:path}")
 async def update_server(name: str, request: ServerUpdate) -> dict[str, Any]:
     """Update a server's enabled flag, libraries and sync overrides; a None override clears it."""
     config = Config.load()
@@ -141,9 +142,9 @@ async def update_server(name: str, request: ServerUpdate) -> dict[str, Any]:
     return {"status": "ok"}
 
 
-@router.delete("/api/servers/{name}")
+@router.delete("/api/servers/{name:path}")
 async def delete_server(name: str) -> dict[str, Any]:
-    """Delete a configured server and save the config."""
+    """Delete a configured server and forget its cached libraries."""
     config = Config.load()
 
     if not config.get_server(name):
@@ -152,12 +153,13 @@ async def delete_server(name: str) -> dict[str, Any]:
     config.servers = [s for s in config.servers if s.name != name]
     config.save()
     state.invalidate_config_cache()
+    state.drop_cached(f"plex_libraries_{name}")
     return {"status": "ok", "message": f"Removed server: {name}"}
 
 
-@router.post("/api/servers/{name}/test")
+@router.post("/api/servers/{name:path}/test")
 def test_server(name: str) -> dict[str, Any]:
-    """Test connection to a specific server."""
+    """Test connection to a server, reporting its name and libraries or the error."""
     config = Config.load()
     server = config.get_server(name)
     if not server:
@@ -165,7 +167,7 @@ def test_server(name: str) -> dict[str, Any]:
     return check_connection(server, config.plex_token)
 
 
-@router.get("/api/servers/{name}/libraries")
+@router.get("/api/servers/{name:path}/libraries")
 def get_server_libraries(name: str) -> dict[str, Any]:
     """Get a server's available libraries and the ones selected to sync."""
     config = Config.load()

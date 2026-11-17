@@ -284,6 +284,16 @@ def test_server_overrides_are_set_and_cleared():
     assert Config.load().servers[0].sync.watched_plex_to_trakt is None
 
 
+def test_server_with_a_slash_in_its_name_can_be_changed_and_removed():
+    """A server named with a slash is changed and removed by its encoded name."""
+    add_server_config("Home/Office")
+    client = local_client()
+    assert client.put("/api/servers/Home%2FOffice", json={"enabled": False}).json() == {"status": "ok"}
+    assert Config.load().servers[0].enabled is False
+    assert client.delete("/api/servers/Home%2FOffice").json()["status"] == "ok"
+    assert Config.load().servers == []
+
+
 def test_config_update_applies_sync_settings_and_rejects_bad_ones():
     """Sent sync settings change and the rest stay; an unknown rating priority is refused."""
     client = local_client()
