@@ -60,14 +60,20 @@ async def _movies_to_collect(engine: SyncEngine, plex_movies: list, collected: s
     return [movie for _, movie in best.values()]
 
 
+def _earliest(*dates: str | None) -> str | None:
+    """Earliest of the given dates that are set, or None."""
+    return min(filter(None, dates), default=None)
+
+
 async def _episodes_to_collect(
     engine: SyncEngine, plex_shows: list, plex_episodes: list, collected: set[tuple],
 ) -> tuple[list[tuple[dict, int, dict, str]], int, int]:
-    """Episode rows to collect, plus show and unnumbered counts; stops on a cancel."""
+    """Episode rows to collect with show and unnumbered counts, marked pushed; stops on a cancel."""
     show_info = {str(show.ratingKey): (extract_plex_ids(show), show.title, show.year) for show in plex_shows}
     rows: list[tuple[dict, int, dict, str]] = []
     shows_seen: set[tuple] = set()
-    seen = set(collected)
+    seen = collected | engine.pushed.collected_episodes
+    queued: dict[tuple, dict[str, Any]] = {}
     unnumbered = 0
     async for episode in engine.paced(plex_episodes, 3, 45, 30, "Episodes"):
         info = show_info.get(str(episode.grandparentRatingKey))
@@ -79,18 +85,23 @@ async def _episodes_to_collect(
             unnumbered += 1
             continue
         ep_keys = [(key, season, number) for key in keys]
-        known = any(k in seen for k in ep_keys)
-        # its other copies may carry only ids Trakt did not list
-        seen.update(ep_keys)
-        if known:
-            continue
-        shows_seen.add(keys[0])
-        entry: dict[str, Any] = {"number": number}
-        collected_at = plex_dt_to_utc_iso(getattr(episode, "addedAt", None))
+        entry = next((queued[k] for k in ep_keys if k in queued), None)
+        if entry is None:
+            known = any(k in seen for k in ep_keys)
+            # its other copies may carry only ids Trakt did not list
+            seen.update(ep_keys)
+            if known:
+                continue
+            entry = {"number": number}
+            _, title, year = info
+            rows.append(({"title": title, "year": year, "ids": dict(keys)}, season, entry, ""))
+            shows_seen.add(keys[0])
+        for k in ep_keys:
+            queued.setdefault(k, entry)
+        collected_at = _earliest(entry.get("collected_at"), plex_dt_to_utc_iso(getattr(episode, "addedAt", None)))
         if collected_at:
             entry["collected_at"] = collected_at
-        _, title, year = info
-        rows.append(({"title": title, "year": year, "ids": dict(keys)}, season, entry, ""))
+    engine.pushed.collected_episodes.update(queued)
     return rows, len(shows_seen), unnumbered
 
 

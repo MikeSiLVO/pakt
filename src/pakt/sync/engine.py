@@ -43,6 +43,7 @@ class PushedToTrakt:
     rated_movies: set[tuple] = field(default_factory=set)
     watched_episodes: set[tuple] = field(default_factory=set)
     rated_episodes: set[tuple] = field(default_factory=set)
+    collected_episodes: set[tuple] = field(default_factory=set)
     watchlist_accounts: set[str] = field(default_factory=set)
 
 

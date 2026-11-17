@@ -1,4 +1,5 @@
 import threading
+from datetime import datetime, timezone
 from types import SimpleNamespace
 
 import pytest
@@ -401,8 +402,8 @@ class ShowLibrary(FakePlex):
         return self.episodes, {"TV": len(self.episodes)}
 
 
-async def collect_episodes(collected_numbers, fix_dates=False):
-    """Collect S01E01 and S01E02 of one show held twice under different ids; return numbers sent."""
+async def collect_episodes(collected_numbers=(), fix_dates=False, pushed=None, added=()):
+    """Collect S01E01 and S01E02 of a show held twice under different ids; return entries sent."""
     class EpisodeTrakt(FakeTrakt):
         """VIP TraktClient stand-in whose collection holds the given S01 episodes of TVDB show 1."""
 
@@ -433,25 +434,41 @@ async def collect_episodes(collected_numbers, fix_dates=False):
 
     shows = [show("s1", ["tvdb://1", "tmdb://5"]), show("s2", ["tmdb://5"])]
     episodes = [plex_episode(key, 1, n) for key in ("s1", "s2") for n in (1, 2)]
+    for episode, when in zip(episodes, added):
+        episode.addedAt = when
     config = Config()
     config.sync.collection_plex_to_trakt = True
     trakt = EpisodeTrakt()
-    engine = SyncEngine(config, trakt, ShowLibrary(shows, episodes))
+    engine = SyncEngine(config, trakt, ShowLibrary(shows, episodes), pushed=pushed)
     engine.fix_collection_dates = fix_dates
     assert await collection.run(engine, SyncResult(), dry_run=False, no_movies=True)
-    return [e["number"] for _, lists in trakt.posts for s in lists.get("shows") or []
+    return [e for _, lists in trakt.posts for s in lists.get("shows") or []
             for season in s["seasons"] for e in season["episodes"]]
 
 
 async def test_collection_sends_each_missing_episode_once():
     """Episodes of a show held twice under different ids go once, and collected ones not at all."""
-    assert await collect_episodes([]) == [1, 2]
-    assert await collect_episodes([1]) == [2]
+    assert await collect_episodes() == [{"number": 1}, {"number": 2}]
+    assert await collect_episodes([1]) == [{"number": 2}]
+
+
+async def test_collected_episodes_carry_their_earliest_copy_date():
+    """An episode held twice goes with the earlier of its copies' added dates."""
+    early, late = datetime(2020, 1, 1, tzinfo=timezone.utc), datetime(2021, 1, 1, tzinfo=timezone.utc)
+    sent = await collect_episodes(added=[late, late, early, None])
+    assert [e["collected_at"] for e in sent] == ["2020-01-01T00:00:00.000Z", "2021-01-01T00:00:00.000Z"]
+
+
+async def test_episodes_an_earlier_server_queued_are_not_sent_again():
+    """A second server holding the same episodes sends none of them."""
+    pushed = PushedToTrakt()
+    assert len(await collect_episodes(pushed=pushed)) == 2
+    assert await collect_episodes(pushed=pushed) == []
 
 
 async def test_fixing_collection_dates_resends_collected_episodes():
     """Fixing dates sends episodes Trakt already has, still once each."""
-    assert await collect_episodes([1, 2], fix_dates=True) == [1, 2]
+    assert await collect_episodes([1, 2], fix_dates=True) == [{"number": 1}, {"number": 2}]
 
 
 class TraktSession:
