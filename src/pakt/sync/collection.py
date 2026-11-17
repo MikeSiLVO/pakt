@@ -8,7 +8,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from pakt.models import SyncResult
-from pakt.plex.media import best_media, extract_media_metadata, extract_plex_ids
+from pakt.plex.media import best_media, extract_plex_ids
 from pakt.sync import report
 from pakt.sync.match import MOVIE_ID_TYPES, SHOW_ID_TYPES, group_by_show, id_keys, plex_dt_to_utc_iso, trakt_item
 from pakt.trakt import TraktAccountLimitError
@@ -48,11 +48,11 @@ async def _movies_to_collect(engine: SyncEngine, plex_movies: list, collected: s
         slot = next((slots[key] for key in keys if key in slots), keys[0])
         for key in keys:
             slots.setdefault(key, slot)
-        score, media = best_media(plex_movie)
+        score, metadata = best_media(plex_movie)
         if slot in best and best[slot][0] >= score:
             continue
         movie = trakt_item(plex_movie, plex_ids, MOVIE_ID_TYPES) or {}
-        movie.update(extract_media_metadata(media))
+        movie.update(metadata)
         collected_at = plex_dt_to_utc_iso(getattr(plex_movie, "addedAt", None))
         if collected_at:
             movie["collected_at"] = collected_at

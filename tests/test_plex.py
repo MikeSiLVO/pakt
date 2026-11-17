@@ -36,6 +36,20 @@ def test_external_guids_win_over_the_legacy_fallback():
     assert (ids.imdb, ids.tmdb, ids.tvdb) == ("tt1", 2, 3)
 
 
+def test_metadata_scores_resolution_then_hdr_then_audio_then_channels():
+    """Each field outranks every field after it, and Trakt's nulls score nothing."""
+    order = [
+        {"resolution": "uhd_4k", "audio_channels": "2.0"},
+        {"resolution": "hd_1080p", "hdr": "dolby_vision", "audio": "aac", "audio_channels": "2.0"},
+        {"resolution": "hd_1080p", "audio": "dolby_atmos", "audio_channels": "2.0"},
+        {"resolution": "hd_1080p", "audio": "dolby_truehd", "audio_channels": "7.1.4"},
+        {"resolution": "hd_1080p", "audio": "dolby_truehd", "audio_channels": "7.1"},
+        {"resolution": None, "hdr": None, "audio": None, "audio_channels": None},
+    ]
+    scores = [media.metadata_score(m) for m in order]
+    assert scores == sorted(scores, reverse=True) and len(set(scores)) == len(scores) and scores[-1] == 0
+
+
 def test_unsupported_agent_gives_no_ids():
     """An agent Trakt cannot match, such as HAMA, yields no ids."""
     ids = media.extract_plex_ids(item("com.plexapp.agents.hama://anidb-1"))

@@ -171,45 +171,31 @@ def _detect_audio_channels(media, audio_stream) -> str | None:
     return CHANNELS_MAP.get(channels)
 
 
-def _score_media(media) -> int:
-    """Score a media version for quality comparison, higher being better."""
-    score = 0
-
+def metadata_score(metadata: dict) -> int:
+    """Score collection metadata in Trakt's form for quality, higher being better."""
+    channels = sum(int(n) for n in re.findall(r"\d+", metadata.get("audio_channels") or ""))
     # weights keep resolution ahead of HDR, HDR ahead of audio, audio ahead of channels
-    resolution = getattr(media, "videoResolution", None)
-    if resolution:
-        trakt_res = RESOLUTION_MAP.get(resolution.lower(), "sd_480p")
-        score += RESOLUTION_RANK.get(trakt_res, 1) * 1000
-
-    hdr_type = _detect_hdr_type(_get_stream(media, VIDEO_STREAM))
-    if hdr_type:
-        score += HDR_RANK.get(hdr_type, 0) * 100
-
-    audio_codec = _detect_audio_codec(media, _get_stream(media, AUDIO_STREAM))
-    if audio_codec:
-        score += AUDIO_RANK.get(audio_codec, 0) * 10
-
-    channels = getattr(media, "audioChannels", 0) or 0
-    score += min(channels, 8)
-
-    return score
+    return (
+        RESOLUTION_RANK.get(metadata.get("resolution") or "", 0) * 10000
+        + HDR_RANK.get(metadata.get("hdr") or "", 0) * 1000
+        + AUDIO_RANK.get(metadata.get("audio") or "", 0) * 100
+        + min(channels, 99)
+    )
 
 
-def best_media(item: Movie | Episode) -> tuple[int, Any]:
-    """Highest scoring media version of an item with its score, or (-1, None) when it has none."""
-    best: tuple[int, Any] = (-1, None)
+def best_media(item: Movie | Episode) -> tuple[int, dict]:
+    """Metadata of an item's highest scoring media version with its score, (-1, {}) with none."""
+    best: tuple[int, dict] = (-1, {})
     for media in getattr(item, "media", None) or []:
-        score = _score_media(media)
+        metadata = extract_media_metadata(media)
+        score = metadata_score(metadata)
         if score > best[0]:
-            best = (score, media)
+            best = (score, metadata)
     return best
 
 
 def extract_media_metadata(media: Any) -> dict:
-    """Extract a media version's metadata for the Trakt collection, empty for None."""
-    if media is None:
-        return {}
-
+    """Extract a media version's metadata for the Trakt collection."""
     metadata: dict = {"media_type": "digital"}
 
     resolution = getattr(media, "videoResolution", None)
