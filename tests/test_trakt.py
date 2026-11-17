@@ -72,15 +72,15 @@ async def test_pages_follow_the_page_count_and_stop_on_an_empty_page(sleeps):
     assert await api_client(handler)._paginated_get("/x", limit=250) == [1, 2, 3]
 
 
-@pytest.mark.parametrize("method, path", [
-    ("get_collection_movies", "/sync/collection/movies"),
-    ("get_collection_shows", "/sync/collection/shows"),
-    ("get_watchlist_movies", "/sync/watchlist/movies"),
-    ("get_watchlist_shows", "/sync/watchlist/shows"),
-    ("get_watched_movies", "/sync/watched/movies"),
+@pytest.mark.parametrize("method, path, extended", [
+    ("get_collection_movies", "/sync/collection/movies", "metadata"),
+    ("get_collection_shows", "/sync/collection/shows", None),
+    ("get_watchlist_movies", "/sync/watchlist/movies", None),
+    ("get_watchlist_shows", "/sync/watchlist/shows", None),
+    ("get_watched_movies", "/sync/watched/movies", None),
 ])
-async def test_paginated_endpoints_send_page_and_limit(sleeps, method, path):
-    """Collection, watchlist and watched reads ask for 250 per page from page 1."""
+async def test_paginated_endpoints_send_page_and_limit(sleeps, method, path, extended):
+    """Paged reads ask for 250 per page from page 1, collected movies with their metadata."""
     seen = []
 
     def handler(request):
@@ -91,6 +91,7 @@ async def test_paginated_endpoints_send_page_and_limit(sleeps, method, path):
     await getattr(api_client(handler), method)()
     assert seen[0].path == path
     assert seen[0].params["limit"] == "250" and seen[0].params["page"] == "1"
+    assert seen[0].params.get("extended") == extended
 
 
 async def test_rate_limit_waits_then_backs_off(sleeps):

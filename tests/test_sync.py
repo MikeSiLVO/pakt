@@ -354,36 +354,94 @@ def test_watchlist_adds_trakt_items_found_by_search():
     assert to_plex == [found]
 
 
-async def test_collection_uses_the_best_copy():
-    """With a movie in two libraries, the collection entry carries the better copy's metadata."""
-    class CollectionTrakt(FakeTrakt):
-        """Fake Trakt with an empty collection, recording collection writes."""
+class CollectionTrakt(FakeTrakt):
+    """VIP TraktClient stand-in whose movie collection holds the given entries, recording writes."""
 
-        async def get_account_limits(self):
-            """Get a VIP account's limits."""
-            return SimpleNamespace(is_vip=True, collection_limit=0)
+    def __init__(self, held=()):
+        super().__init__()
+        self.held = list(held)
 
-        async def get_collection_movies(self):
-            """Get an empty movie collection."""
-            return []
+    async def get_account_limits(self):
+        """Get a VIP account's limits."""
+        return SimpleNamespace(is_vip=True, collection_limit=0)
 
-        async def get_collection_shows(self):
-            """Get an empty show collection."""
-            return []
+    async def get_collection_movies(self):
+        """Get the collected movies given to the fake."""
+        return self.held
 
-        async def add_to_collection(self, **lists):
-            """Record a collection write."""
-            self.posts.append(("collection", lists))
-            return {}
+    async def get_collection_shows(self):
+        """Get an empty show collection."""
+        return []
 
+    async def add_to_collection(self, **lists):
+        """Record a collection write."""
+        self.posts.append(("collection", lists))
+        return {}
+
+
+def collected_movie(imdb: str, resolution: str, collected_at: str = "2019-01-01T00:00:00.000Z") -> dict:
+    """A Trakt collection entry for an IMDb id at a resolution, as read with its metadata."""
+    return {"collected_at": collected_at, "movie": {"ids": {"imdb": imdb}}, "metadata": {"resolution": resolution}}
+
+
+def added_on(movie, year: int):
+    """Set a Plex movie's added date to the start of a year, in UTC."""
+    movie.addedAt = datetime(year, 1, 1, tzinfo=timezone.utc)
+    return movie
+
+
+async def collect_movies(plex_movies, held=(), pushed=None) -> list[dict]:
+    """Collect the given Plex movies against the given Trakt entries; return movies sent."""
     config = Config()
     config.sync.collection_plex_to_trakt = True
-    trakt = CollectionTrakt()
-    plex = FakePlex([plex_movie("tt1"), plex_movie("tt1", score=1)])
-    engine = SyncEngine(config, trakt, plex)
+    trakt = CollectionTrakt(held)
+    engine = SyncEngine(config, trakt, FakePlex(plex_movies), pushed=pushed)
     assert await collection.run(engine, SyncResult(), dry_run=False, no_shows=True)
-    sent = trakt.posts[0][1]["movies"]
+    return [m for _, lists in trakt.posts for m in lists.get("movies") or []]
+
+
+async def test_collection_uses_the_best_copy():
+    """With a movie in two libraries, the collection entry carries the better copy's metadata."""
+    sent = await collect_movies([plex_movie("tt1"), plex_movie("tt1", score=1)])
     assert len(sent) == 1 and sent[0]["resolution"] == "uhd_4k"
+
+
+async def test_collected_movies_carry_their_earliest_copy_date():
+    """A movie held twice goes from the better copy, dated by whichever copy came first."""
+    sent = await collect_movies([added_on(plex_movie("tt1"), 2020), added_on(plex_movie("tt1", score=1), 2024)])
+    assert [(m["resolution"], m["collected_at"]) for m in sent] == [("uhd_4k", "2020-01-01T00:00:00.000Z")]
+
+
+async def test_a_better_copy_upgrades_a_collected_movie_and_keeps_the_earlier_date():
+    """A 4K copy replaces Trakt's 1080p entry, keeping Trakt's date when it is the earlier one."""
+    sent = await collect_movies([added_on(plex_movie("tt1", score=1), 2024)], [collected_movie("tt1", "hd_1080p")])
+    assert [(m["resolution"], m["collected_at"]) for m in sent] == [("uhd_4k", "2019-01-01T00:00:00.000Z")]
+
+
+async def test_an_equal_or_worse_copy_leaves_a_collected_movie_alone():
+    """A copy no better than Trakt's entry is not sent; a 4K entry never drops to 1080p."""
+    assert await collect_movies([plex_movie("tt1")], [collected_movie("tt1", "hd_1080p")]) == []
+    assert await collect_movies([plex_movie("tt1")], [collected_movie("tt1", "uhd_4k")]) == []
+
+
+async def test_a_later_server_sends_only_a_better_copy():
+    """A movie an earlier server queued is resent only from a better copy, with the earlier date."""
+    pushed = PushedToTrakt()
+    assert len(await collect_movies([added_on(plex_movie("tt1"), 2020)], pushed=pushed)) == 1
+    assert await collect_movies([plex_movie("tt1")], pushed=pushed) == []
+    sent = await collect_movies([added_on(plex_movie("tt1", score=1), 2024)], pushed=pushed)
+    assert [(m["resolution"], m["collected_at"]) for m in sent] == [("uhd_4k", "2020-01-01T00:00:00.000Z")]
+
+
+@pytest.mark.parametrize("counts, fixing, expected", [
+    ((2, 1, 5, 1), False, "Trakt +2 movies, +5 episodes of 1 show, 1 movie upgraded"),
+    ((0, 3, 0, 0), False, "Trakt 3 movies upgraded"),
+    ((2, 0, 0, 0), True, "re-sending 2 movies with Plex dates"),
+    ((0, 0, 0, 0), False, "no changes"),
+])
+def test_collection_summary_counts_additions_and_upgrades_apart(counts, fixing, expected):
+    """The collection line names additions and upgrades apart, and says when nothing changed."""
+    assert collection._describe(*counts, fixing) == expected
 
 
 class ShowLibrary(FakePlex):

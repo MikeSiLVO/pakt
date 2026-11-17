@@ -319,8 +319,8 @@ class TraktClient:
         return [RatedItem(**item) for item in response.json()]
 
     async def get_collection_movies(self) -> list[dict[str, Any]]:
-        """Get all collected movies, paging through Trakt's 250-item maximum."""
-        return await self._paginated_get("/sync/collection/movies", limit=250)
+        """Get all collected movies with media metadata, paging through Trakt's 250-item maximum."""
+        return await self._paginated_get("/sync/collection/movies", params={"extended": "metadata"}, limit=250)
 
     async def get_collection_shows(self) -> list[dict[str, Any]]:
         """Get all collected shows, paging through Trakt's 250-item maximum."""

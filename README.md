@@ -158,7 +158,7 @@ See the [Docker Guide](https://github.com/MikeSiLVO/Pakt/blob/main/docs/docker.m
 | Collection | ✓ | - |
 | Watchlist | ✓ | ✓ |
 
-Collection sync includes media info (resolution, HDR, audio codec) and uses Plex's `addedAt` date for `collected_at` timestamps.
+Collection sync includes media info (resolution, HDR, audio codec) and uses Plex's `addedAt` date for `collected_at` timestamps, taking the earliest copy when a title is in more than one library or server. A movie already in the Trakt collection is updated when Plex has a better copy (resolution first, then HDR, then audio), never a worse one, keeping its collected date when that is earlier.
 
 ## Multi-Server Support
 

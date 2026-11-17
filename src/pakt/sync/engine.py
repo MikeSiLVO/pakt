@@ -37,12 +37,14 @@ class TraktCache:
 
 @dataclass
 class PushedToTrakt:
-    """Items queued for Trakt this run and watchlists already synced; later servers skip both."""
+    """Items queued and watchlists synced this run; later servers skip all but better copies."""
 
     watched_movies: set[tuple] = field(default_factory=set)
     rated_movies: set[tuple] = field(default_factory=set)
     watched_episodes: set[tuple] = field(default_factory=set)
     rated_episodes: set[tuple] = field(default_factory=set)
+    # score and date of each; a later server sends only a better copy
+    collected_movies: dict[tuple, tuple[int, str]] = field(default_factory=dict)
     collected_episodes: set[tuple] = field(default_factory=set)
     watchlist_accounts: set[str] = field(default_factory=set)
 
