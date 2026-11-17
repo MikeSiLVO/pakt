@@ -190,6 +190,8 @@ class SyncEngine:
     def describe_options(self, collection_only: bool) -> str:
         """Describe what this server syncs and which way, for the line that opens its sync."""
         if collection_only:
+            if not self.get_sync_option("collection_plex_to_trakt"):
+                return "Collection sync is off for this server; nothing to sync"
             return "Syncing collection only"
         options = self.options()
         ratings = report.direction(options["ratings_plex_to_trakt"], options["ratings_trakt_to_plex"])

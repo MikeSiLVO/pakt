@@ -305,6 +305,17 @@ async def test_auth_errors_stop_the_server(monkeypatch):
         await engine.sync()
 
 
+@pytest.mark.parametrize("on, line", [
+    (True, "Syncing collection only"),
+    (False, "Collection sync is off for this server; nothing to sync"),
+])
+def test_collection_only_says_when_collection_sync_is_off(on, line):
+    """Asking for the collection alone on a server that does not sync it says so."""
+    config = Config()
+    config.sync.collection_plex_to_trakt = on
+    assert SyncEngine(config, FakeTrakt(), FakePlex([])).describe_options(True) == line
+
+
 async def test_second_sync_is_refused_while_one_runs():
     """A sync started while another process holds the lock fails fast."""
     config = Config()
