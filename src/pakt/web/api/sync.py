@@ -46,35 +46,52 @@ def _last_result(result: SyncResult) -> dict[str, Any]:
     }
 
 
-async def scheduled_sync() -> None:
-    """Run a live sync for the scheduler unless one is already running."""
+def _claim() -> bool:
+    """Claim the sync slot for a new run with an empty log; False while one is running."""
     sync_state = state.sync_state
     if sync_state["running"]:
-        return
+        return False
+    sync_state.update(running=True, cancelled=False, logs=[])
+    return True
 
-    sync_state["running"] = True
-    sync_state["cancelled"] = False
-    sync_state["logs"] = []
 
+async def _run(request: SyncRequest, started_by: str) -> None:
+    """Run a claimed sync, keep its outcome for the status card and free the slot."""
+    sync_state = state.sync_state
     try:
         config = Config.load()
         result = await run_multi_server_sync(
             config,
-            dry_run=False,
+            server_names=request.servers,
+            dry_run=request.dry_run,
+            verbose=request.verbose,
+            fix_collection_dates=request.fix_collection_dates,
+            collection_only=request.collection_only,
+            no_movies=request.no_movies,
+            no_shows=request.no_shows,
             on_token_refresh=state.token_saver(config),
-            log_callback=lambda msg: sync_state["logs"].append(msg),
+            log_callback=sync_state["logs"].append,
             cancel_check=lambda: sync_state["cancelled"],
-            started_by="scheduler",
+            started_by=started_by,
         )
-        sync_state["last_result"] = _last_result(result)
-        sync_state["last_run"] = datetime.now().isoformat()
+        if sync_state["cancelled"]:
+            sync_state["last_result"] = {"cancelled": True}
+        else:
+            sync_state["last_result"] = _last_result(result)
+            sync_state["last_run"] = datetime.now().isoformat()
     except Exception as e:
-        logger.exception(f"Scheduled sync failed: {type(e).__name__}: {e}")
+        logger.exception(f"Sync failed: {type(e).__name__}: {e}")
         sync_state["logs"].append(f"ERROR:{e}")
         sync_state["last_result"] = {"error": str(e)}
     finally:
         sync_state["running"] = False
         sync_state["cancelled"] = False
+
+
+async def scheduled_sync() -> None:
+    """Run a live sync for the scheduler unless one is already running."""
+    if _claim():
+        await _run(SyncRequest(), "scheduler")
 
 
 def start_scheduler(config: Config) -> None:
@@ -90,56 +107,10 @@ def start_scheduler(config: Config) -> None:
 @router.post("/api/sync")
 async def start_sync(request: SyncRequest, background_tasks: BackgroundTasks) -> dict[str, Any]:
     """Start a sync in the background, refusing while one is already running."""
-    sync_state = state.sync_state
-    if sync_state["running"]:
+    # claimed now; a background task starts after the response, past a second request's check
+    if not _claim():
         return {"status": "error", "message": "Sync already running"}
-
-    # claim it now; a background task starts after the response, past a second request's check
-    sync_state["running"] = True
-    sync_state["cancelled"] = False
-    sync_state["logs"] = []
-
-    def log(msg: str):
-        """Append a line for the web console to poll."""
-        sync_state["logs"].append(msg)
-
-    def is_cancelled() -> bool:
-        """Whether a cancel was requested, polled by the sync engine."""
-        return sync_state["cancelled"]
-
-    async def do_sync():
-        """Run the sync in the background and mirror its outcome into sync_state."""
-        try:
-            config = Config.load()
-            result = await run_multi_server_sync(
-                config,
-                server_names=request.servers,
-                dry_run=request.dry_run,
-                verbose=request.verbose,
-                fix_collection_dates=request.fix_collection_dates,
-                collection_only=request.collection_only,
-                no_movies=request.no_movies,
-                no_shows=request.no_shows,
-                on_token_refresh=state.token_saver(config),
-                log_callback=log,
-                cancel_check=is_cancelled,
-                started_by="web UI",
-            )
-
-            if sync_state["cancelled"]:
-                sync_state["last_result"] = {"cancelled": True}
-            else:
-                sync_state["last_result"] = _last_result(result)
-                sync_state["last_run"] = datetime.now().isoformat()
-        except Exception as e:
-            logger.exception(f"Sync failed: {type(e).__name__}: {e}")
-            log(f"ERROR:{e}")
-            sync_state["last_result"] = {"error": str(e)}
-        finally:
-            sync_state["running"] = False
-            sync_state["cancelled"] = False
-
-    background_tasks.add_task(do_sync)
+    background_tasks.add_task(_run, request, "web UI")
     return {"status": "started"}
 
 

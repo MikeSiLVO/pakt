@@ -343,6 +343,35 @@ def test_trakt_logout_clears_the_tokens(monkeypatch):
     assert saved.access_token == "" and saved.refresh_token == ""
 
 
+def test_web_and_scheduled_syncs_share_one_slot(monkeypatch):
+    """Page and scheduler syncs report their counts when done; one started mid-run is refused."""
+    from pakt.models import SyncResult
+    from pakt.web.api import sync as sync_api
+
+    started_by = []
+
+    async def fake_sync(config, **options):
+        """Record the caller, log one line and report two items added."""
+        started_by.append(options["started_by"])
+        options["log_callback"]("line")
+        return SyncResult(added_to_trakt=2)
+
+    monkeypatch.setattr(sync_api, "run_multi_server_sync", fake_sync)
+    monkeypatch.setattr(state, "sync_state", {**state.sync_state, "running": False, "logs": []})
+    client = local_client()
+    assert client.post("/api/sync", json={}).json() == {"status": "started"}
+    status = client.get("/api/sync/status").json()
+    assert not status["running"] and status["logs"] == ["line"] and status["last_result"]["added_to_trakt"] == 2
+
+    asyncio.run(sync_api.scheduled_sync())
+    assert started_by == ["web UI", "scheduler"]
+
+    state.sync_state["running"] = True
+    assert client.post("/api/sync", json={}).json()["status"] == "error"
+    asyncio.run(sync_api.scheduled_sync())
+    assert len(started_by) == 2
+
+
 def test_scheduler_status_shows_the_last_sync_when_off():
     """With the scheduler off, the status still carries when the last sync finished."""
     finished = datetime(2026, 10, 27, 6, 1, tzinfo=timezone.utc)
