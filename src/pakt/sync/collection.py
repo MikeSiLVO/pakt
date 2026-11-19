@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
+import asyncio
 import gc
 import logging
 import time
 from typing import TYPE_CHECKING, Any
 
 from pakt.models import SyncResult
-from pakt.plex.media import best_media, extract_plex_ids, metadata_score
+from pakt.plex.media import best_media, extract_plex_ids, may_be_hdr, metadata_score
 from pakt.sync import report
 from pakt.sync.match import MOVIE_ID_TYPES, SHOW_ID_TYPES, group_by_show, id_keys, plex_dt_to_utc_iso, trakt_item
 from pakt.trakt import TraktAccountLimitError
@@ -39,10 +40,20 @@ def _earliest(*dates: str | None) -> str | None:
     return min(filter(None, dates), default=None)
 
 
+async def _fetch_streams(engine: SyncEngine, plex_movies: list) -> dict:
+    """Fetch movies with a possible HDR version again in full, streams included, by rating key."""
+    keys = [m.ratingKey for m in plex_movies if any(may_be_hdr(v) for v in getattr(m, "media", None) or [])]
+    if not keys:
+        return {}
+    engine.progress(3, 4, 22, "Plex HDR")
+    return await asyncio.to_thread(engine.plex.get_items_in_full, keys)
+
+
 async def _movies_to_collect(
     engine: SyncEngine, plex_movies: list, held: dict[tuple, tuple[int, str]],
 ) -> tuple[list[dict], list[dict]]:
     """Movies to add and upgrade from each title's best copy, marked pushed; stops on a cancel."""
+    full = await _fetch_streams(engine, plex_movies)
     best: dict[tuple, tuple[int, dict]] = {}
     earliest: dict[tuple, str | None] = {}
     slots: dict[tuple, tuple] = {}
@@ -57,7 +68,7 @@ async def _movies_to_collect(
             slots.setdefault(key, slot)
         slot_keys.setdefault(slot, set()).update(keys)
         earliest[slot] = _earliest(earliest.get(slot), plex_dt_to_utc_iso(getattr(plex_movie, "addedAt", None)))
-        score, metadata = best_media(plex_movie)
+        score, metadata = best_media(full.get(plex_movie.ratingKey, plex_movie))
         if slot not in best or score > best[slot][0]:
             best[slot] = (score, (trakt_item(plex_movie, plex_ids, MOVIE_ID_TYPES) or {}) | metadata)
     if engine.is_cancelled():

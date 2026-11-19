@@ -167,6 +167,22 @@ def test_sections_are_counted_with_clashing_names_numbered():
     assert len(items) == 5 and counts == {"Movies": 2, "Movies (2)": 3}
 
 
+def test_items_in_full_come_100_to_a_request_without_a_failed_batch():
+    """Every 100 keys are one request; a batch Plex fails on is left out and the rest are kept."""
+    def fetch(keys):
+        """Return each key's item, failing on the second batch."""
+        if keys[0] == 100:
+            raise ValueError("timed out")
+        return [SimpleNamespace(ratingKey=key) for key in keys]
+
+    plex = client.PlexClient(ServerConfig(name="s", token="t"))
+    plex._server = mock.Mock(**{"fetchItems.side_effect": fetch})
+    full = plex.get_items_in_full(list(range(250)))
+    assert sorted(full) == [*range(100), *range(200, 250)]
+    assert [len(call.args[0]) for call in plex._server.fetchItems.call_args_list] == [100, 100, 50]
+    assert full[0]._autoReload is False
+
+
 def test_watchlist_batch_reports_failures():
     """Items Plex refuses come back with their error; the rest are added."""
     plex_account = mock.Mock()

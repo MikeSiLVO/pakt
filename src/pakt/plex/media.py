@@ -126,6 +126,13 @@ def _detect_hdr_type(video_stream) -> str | None:
     return None
 
 
+def may_be_hdr(media: Any) -> bool:
+    """Whether a version could be HDR: 10 bits or more, or AV1 or VP9, which omit bit depth."""
+    profile = getattr(media, "videoProfile", None) or ""
+    codec = (getattr(media, "videoCodec", None) or "").lower()
+    return "10" in profile or "12" in profile or codec in ("av1", "vp9")
+
+
 def _detect_audio_codec(media) -> str | None:
     """Detect a version's audio codec, telling Atmos, DTS:X and DTS-HD apart by its profile."""
     codec = (getattr(media, "audioCodec", None) or "").lower()

@@ -61,14 +61,19 @@ class FakeTrakt:
 class FakePlex:
     """PlexClient stand-in serving fixed movies and recording every write."""
 
-    def __init__(self, movies):
+    def __init__(self, movies, full=None):
         self.movies = movies
+        self.full = full or {}
         self.watched: list = []
         self.rated: list = []
 
     def get_all_movies_with_counts(self, libraries):
         """Get the movies given to the fake as one library."""
         return self.movies, {"Movies": len(self.movies)}
+
+    def get_items_in_full(self, rating_keys):
+        """Get the full copies given to the fake for the keys asked for."""
+        return {key: self.full[key] for key in rating_keys if key in self.full}
 
     def mark_watched_batch(self, items):
         """Record items marked watched; none fail."""
@@ -401,12 +406,12 @@ def added_on(movie, year: int):
     return movie
 
 
-async def collect_movies(plex_movies, held=(), pushed=None) -> list[dict]:
+async def collect_movies(plex_movies, held=(), pushed=None, full=None) -> list[dict]:
     """Collect the given Plex movies against the given Trakt entries; return movies sent."""
     config = Config()
     config.sync.collection_plex_to_trakt = True
     trakt = CollectionTrakt(held)
-    engine = SyncEngine(config, trakt, FakePlex(plex_movies), pushed=pushed)
+    engine = SyncEngine(config, trakt, FakePlex(plex_movies, full), pushed=pushed)
     assert await collection.run(engine, SyncResult(), dry_run=False, no_shows=True)
     return [m for _, lists in trakt.posts for m in lists.get("movies") or []]
 
@@ -415,6 +420,19 @@ async def test_collection_uses_the_best_copy():
     """With a movie in two libraries, the collection entry carries the better copy's metadata."""
     sent = await collect_movies([plex_movie("tt1"), plex_movie("tt1", score=1)])
     assert len(sent) == 1 and sent[0]["resolution"] == "uhd_4k"
+
+
+async def test_hdr_comes_from_the_full_copy_of_a_movie_that_may_be_hdr():
+    """A 10-bit copy is read again in full for its HDR; an 8-bit one keeps its listed copy."""
+    ten_bit = plex_movie("tt1", score=1)
+    ten_bit.media[0].videoProfile = "main 10"
+    hdr_stream = SimpleNamespace(streamType=1, colorTrc="smpte2084", displayTitle="4K HDR10")
+    hdr_copy = SimpleNamespace(media=[SimpleNamespace(
+        videoResolution="4k", audioCodec=None, audioChannels=0, parts=[SimpleNamespace(streams=[hdr_stream])],
+    )])
+    sent = await collect_movies([ten_bit, plex_movie("tt2")], held=[collected_movie("tt1", "uhd_4k")],
+                                full={"tt1": hdr_copy, "tt2": hdr_copy})
+    assert {m["ids"]["imdb"]: m.get("hdr") for m in sent} == {"tt1": "hdr10", "tt2": None}
 
 
 async def test_collected_movies_carry_their_earliest_copy_date():

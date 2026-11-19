@@ -175,6 +175,19 @@ class PlexClient:
         """Get all episodes from specified libraries with per-library counts."""
         return self._fetch_sections("show", library_names, episodes=True)
 
+    def get_items_in_full(self, rating_keys: list[int]) -> dict[int, Movie]:
+        """Get items in full, streams included, 100 per request; a batch that fails is left out."""
+        full: dict[int, Movie] = {}
+        for start in range(0, len(rating_keys), 100):
+            batch = rating_keys[start:start + 100]
+            try:
+                items = self.server.fetchItems(batch)
+            except Exception as e:
+                logger.warning(f"Plex could not read the streams of {len(batch)} items: {e}")
+                continue
+            full.update((item.ratingKey, item) for item in _disable_auto_reload(items))
+        return full
+
     def mark_watched_batch(
         self, items: Sequence[Movie | Episode], max_workers: int = 10
     ) -> list[tuple[Movie | Episode, Exception]]:
