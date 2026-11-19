@@ -1,5 +1,34 @@
 # Changelog
 
+## [0.5.3] - 2026-11-21
+
+### Added
+- **Collection upgrades** - A movie already in the Trakt collection is updated when Plex has a better copy (resolution first, then HDR, then audio), never a worse one. The first sync also fills in the quality of collected movies Trakt holds without it
+
+### Fixed
+- **A movie or episode held twice under different ids could reach Trakt twice** - Copies in other libraries or on other servers count as one item for plays, ratings and the collection
+- **With more than one server, each resent the collection items the servers before it had just sent, and the last one's copy won even when worse** - A later server sends a movie again only from a better copy
+- **A movie or episode held more than once was collected with the date of its best or first-found copy** - It takes the earliest copy's date
+- **Collected movies never carried HDR, Dolby Atmos, DTS:X or DTS-HD, and DTS-HD MA tracks went without any audio codec** - Movies already collected are corrected at the next sync
+- **Plays could reach Trakt twice when Trakt timed out or was down** - They are no longer resent; the next sync picks up anything that did not land
+- **When Trakt failed partway through a sync, the next server sent the same items again**
+- **A movie watched since it was added to the Plex watchlist went back on the Trakt watchlist at the next sync**
+- **Parallel login attempts got past the five-try lockout, and an oversized login request was not refused**
+- **Setup, `pakt password`, `pakt libraries` and adding a server could put back a Trakt token that was refreshed meanwhile**, which then failed at the next sync
+- **Adding a server in the web UI held up every other request, a running sync included, until plex.tv answered**
+- **While plex.tv was unreachable, a server of your own reached over the internet was skipped** - It is tried at its saved address
+- **Logging out of Trakt while Trakt was unreachable failed and kept the tokens** - The tokens are cleared either way
+- **Servers named with a `/` could not be changed or removed in the web UI**
+- **A removed server's libraries showed for up to five minutes on a new server of the same name**
+- **Web UI settings showed "Saved" when the change was refused** - The error is shown instead
+- **A sync started by the scheduler or the tray lost its first log lines in an open web UI tab**
+- **The tray showed the next sync in UTC**
+- **`pakt servers add` printed `{name}` instead of the server's name**
+- **A collection-only sync on a server with collection sync off reported nothing changed without saying why** - It says collection sync is off
+
+### Changed
+- **Reverse proxy setup** - A proxy on the same machine must send the visitor's address in `X-Forwarded-For` or pass on their Host header; without either, everyone reaching the web UI through it gets in without the password
+
 ## [0.5.2] - 2026-11-04
 
 ### Added
