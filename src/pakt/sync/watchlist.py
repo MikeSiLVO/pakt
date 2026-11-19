@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Callable
 
 from pakt.models import SyncResult
@@ -20,15 +21,32 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
+def _watched_since_listed(plex: PlexClient, item: Any, keys: list[tuple], just_watched: set[tuple],
+                          last_watched: dict[tuple, datetime]) -> bool:
+    """Whether sent watched this run or watched since Plex listed it; yes if Plex can't say."""
+    if any(k in just_watched for k in keys):
+        return True
+    watched_at = max((last_watched[k] for k in keys if k in last_watched), default=None)
+    if watched_at is None:
+        return False
+    try:
+        listed_at = plex.watchlisted_at(item)
+    except Exception as e:
+        logger.warning(f"Watchlist: could not read when '{item.title}' went on the Plex watchlist: {e}")
+        return True
+    return listed_at is None or watched_at > listed_at
+
+
 def plan(
     plex: PlexClient,
     trakt_movies: list[dict],
     trakt_shows: list[dict],
     just_watched: set[tuple],
+    last_watched: dict[tuple, datetime],
     options: dict[str, bool],
     is_cancelled: Callable[[], bool],
 ) -> tuple[list[dict], list[dict], list[Any], int] | None:
-    """Plan watchlist additions both ways in a worker thread; None if cancelled."""
+    """Plan watchlist additions both ways, blocking on Plex calls; None if cancelled."""
     plex_watchlist = plex.get_watchlist()
     plex_movie_keys: set[tuple] = set()
     plex_show_keys: set[tuple] = set()
@@ -49,7 +67,7 @@ def plan(
         for item, plex_ids, is_show, keys in plex_entries:
             on_trakt = any(k in (trakt_show_keys if is_show else trakt_movie_keys) for k in keys)
             # Trakt drops a movie from its watchlist once it is watched
-            if on_trakt or (not is_show and any(k in just_watched for k in keys)):
+            if on_trakt or (not is_show and _watched_since_listed(plex, item, keys, just_watched, last_watched)):
                 continue
             data = trakt_item(item, plex_ids, SHOW_ID_TYPES if is_show else MOVIE_ID_TYPES)
             if data:
@@ -97,10 +115,15 @@ async def run(engine: SyncEngine, result: SyncResult, dry_run: bool) -> bool:
                 and len(trakt_movies) + len(trakt_shows) >= limits.watchlist_limit)
     if at_limit:
         options["watchlist_plex_to_trakt"] = False
+    last_watched: dict[tuple, datetime] = {}
+    if options["watchlist_plex_to_trakt"]:
+        watched = await engine.cache.get(engine.trakt.get_watched_movies)
+        last_watched = {key: item.last_watched_at for item in watched if item.movie and item.last_watched_at
+                        for key in id_keys(item.movie.get("ids", {}), MOVIE_ID_TYPES)}
 
     engine.progress(4, 4, 30, "Comparing watchlists")
     planned = await asyncio.to_thread(
-        plan, engine.plex, trakt_movies, trakt_shows, engine.pushed.watched_movies,
+        plan, engine.plex, trakt_movies, trakt_shows, engine.pushed.watched_movies, last_watched,
         options, engine.is_cancelled,
     )
     if planned is None:

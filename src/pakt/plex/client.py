@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 
 from plexapi.exceptions import Unauthorized
 from plexapi.myplex import MyPlexAccount
@@ -246,6 +247,11 @@ class PlexClient:
     def get_watchlist(self) -> list[Movie | Show]:
         """Get account watchlist (includes items not in library), with each item's external IDs."""
         return _disable_auto_reload(self.account.watchlist(includeGuids=1))
+
+    def watchlisted_at(self, item: Movie | Show) -> datetime | None:
+        """When the account put an item on its watchlist, in UTC; None when Plex does not say."""
+        when = getattr(self.account.userState(item), "watchlistedAt", None)
+        return when.astimezone(timezone.utc) if when else None
 
     def add_to_watchlist_batch(self, items: Sequence[Movie | Show]) -> list[tuple[Movie | Show, Exception]]:
         """Add items to the account watchlist one by one; returns (item, error) for any failures."""

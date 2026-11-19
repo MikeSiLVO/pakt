@@ -345,7 +345,7 @@ def watch_item(kind: str, guid: str, title: str = "Title"):
 def plan(plex, trakt_movies=(), trakt_shows=(), just_watched=frozenset(), to_trakt=True, to_plex=True):
     """Plan the watchlist with both directions on unless told otherwise."""
     options = {"watchlist_plex_to_trakt": to_trakt, "watchlist_trakt_to_plex": to_plex}
-    return watchlist.plan(plex, list(trakt_movies), list(trakt_shows), set(just_watched), options, lambda: False)
+    return watchlist.plan(plex, list(trakt_movies), list(trakt_shows), set(just_watched), {}, options, lambda: False)
 
 
 def test_watchlist_keeps_movie_and_show_ids_apart():
@@ -360,6 +360,47 @@ def test_watchlist_skips_movies_just_marked_watched():
     plex = watchlist_plex([watch_item("movie", "imdb://tt1")])
     movies, _, _, _ = plan(plex, just_watched={("imdb", "tt1")}, to_plex=False)
     assert movies == []
+
+
+class WatchlistTrakt(FakeTrakt):
+    """VIP TraktClient stand-in with an empty watchlist and dated plays, recording writes."""
+
+    def __init__(self, watched_at):
+        super().__init__()
+        self.watched = [WatchedItem(movie={"ids": {"imdb": imdb}}, last_watched_at=when)
+                        for imdb, when in watched_at.items()]
+
+    async def get_account_limits(self):
+        """Get a VIP account's limits."""
+        return SimpleNamespace(is_vip=True, watchlist_limit=0)
+
+    async def get_watchlist_movies(self):
+        """Get an empty movie watchlist."""
+        return []
+
+    async def get_watchlist_shows(self):
+        """Get an empty show watchlist."""
+        return []
+
+    async def add_to_watchlist(self, **lists):
+        """Record a watchlist write."""
+        self.posts.append(("watchlist", lists))
+        return {}
+
+
+async def test_watchlist_skips_movies_watched_since_plex_listed_them():
+    """A movie watched since Plex listed it is skipped; one listed after its last watch is sent."""
+    config = Config()
+    config.sync.watchlist_plex_to_trakt = True
+    year = {n: datetime(n, 1, 1, tzinfo=timezone.utc) for n in (2023, 2024, 2025)}
+    trakt = WatchlistTrakt({"tt1": year[2025], "tt2": year[2024]})
+    listed = {"imdb://tt1": year[2023], "imdb://tt2": year[2025], "imdb://tt3": year[2023]}
+    plex = watchlist_plex([watch_item("movie", guid) for guid in listed])
+    plex.account_token, plex.add_to_watchlist_batch = "ACCOUNT", lambda items: []
+    plex.watchlisted_at = lambda item: listed[item.ratingKey]
+    assert await watchlist.run(SyncEngine(config, trakt, plex), SyncResult(), dry_run=False)
+    sent = [m["ids"]["imdb"] for _, lists in trakt.posts for m in lists.get("movies") or []]
+    assert sent == ["tt2", "tt3"]
 
 
 def test_watchlist_adds_trakt_items_found_by_search():

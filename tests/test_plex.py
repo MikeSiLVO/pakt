@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest import mock
 
@@ -181,6 +182,15 @@ def test_items_in_full_come_100_to_a_request_without_a_failed_batch():
     assert sorted(full) == [*range(100), *range(200, 250)]
     assert [len(call.args[0]) for call in plex._server.fetchItems.call_args_list] == [100, 100, 50]
     assert full[0]._autoReload is False
+
+
+def test_watchlist_date_comes_back_in_utc():
+    """Plex's local watchlist time comes back in UTC, comparable with Trakt's watch times."""
+    local = datetime(2023, 6, 26, 4, 38)
+    plex = client.PlexClient(ServerConfig(name="s", token="t"))
+    plex._account = mock.Mock(**{"userState.return_value": SimpleNamespace(watchlistedAt=local)})
+    when = plex.watchlisted_at(SimpleNamespace())
+    assert when == local.astimezone() and when.tzinfo is timezone.utc
 
 
 def test_watchlist_batch_reports_failures():
