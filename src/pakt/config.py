@@ -95,12 +95,13 @@ class ServerSyncOverrides(BaseModel):
 
 
 class ServerConfig(BaseModel):
-    """One Plex server: how to reach it, its own token, and what it syncs."""
+    """One Plex server: its address, its own token, whether the account owns it, what it syncs."""
 
     name: str
     url: str = ""
     token: str = ""
     server_name: str = ""
+    owned: bool = False
     enabled: bool = True
     movie_libraries: list[str] = Field(default_factory=list)
     show_libraries: list[str] = Field(default_factory=list)

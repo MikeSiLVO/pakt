@@ -5,7 +5,7 @@ from unittest import mock
 import pytest
 from plexapi.exceptions import NotFound, Unauthorized
 
-from pakt.config import ServerConfig
+from pakt.config import Config, ServerConfig
 from pakt.plex import account, client, media
 
 
@@ -120,6 +120,21 @@ def test_account_token_may_reach_a_lan_address():
             mock.patch.object(client.PlexClient, "_persist_connection"):
         client.PlexClient(shared_server(url="http://192.168.1.5:32400"), account_token="ACCOUNT").connect()
     server.assert_called_once_with("http://192.168.1.5:32400", "ACCOUNT")
+
+
+def test_owned_server_is_tried_at_its_remote_address_once_plex_tv_is_down():
+    """With plex.tv down, a server plex.tv called owned is tried at its saved remote address."""
+    url = "https://8-8-4-4.x.plex.direct:32400"
+    Config(servers=[ServerConfig(name="Own", server_name="Own", url=url, token="ACCOUNT")]).save()
+    plex_account = mock.Mock(**{"resource.return_value": mock.Mock(owned=True, accessToken="ACCOUNT")})
+    with mock.patch.object(client, "MyPlexAccount", return_value=plex_account), \
+            mock.patch.object(account, "connect_resource", return_value=mock.Mock(_baseurl=url, _token="ACCOUNT")):
+        client.PlexClient(Config.load().servers[0], account_token="ACCOUNT").connect()
+    with mock.patch.object(client, "MyPlexAccount", side_effect=RuntimeError("plex.tv down")), \
+            mock.patch.object(client, "PlexServer") as server, \
+            mock.patch.object(client.PlexClient, "_persist_connection"):
+        client.PlexClient(Config.load().servers[0], account_token="ACCOUNT").connect()
+    server.assert_called_once_with(url, "ACCOUNT")
 
 
 def test_direct_fallback_uses_the_servers_own_token():

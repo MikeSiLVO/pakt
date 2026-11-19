@@ -35,18 +35,18 @@ class PlexClient:
         self._token = server_config.token
         self._account_token = account_token or server_config.token
         self._server_name = server_config.server_name
+        self._owned = server_config.owned
         self.server_config = server_config
         self._server: PlexServer | None = None
         self._account: MyPlexAccount | None = None
 
     def connect(self) -> None:
         """Connect via plex.tv or saved URL, saving what worked; PlexAuthError on refused token."""
-        owned = False
         if self._account_token and self._server_name:
             try:
                 logger.debug("Connecting to '%s' via plex.tv discovery", self._server_name)
                 resource = MyPlexAccount(token=self._account_token).resource(self._server_name)
-                owned = bool(resource.owned)
+                self._owned = bool(resource.owned)
                 self._token = str(resource.accessToken or "") or self._token
                 self._server = account.connect_resource(resource)
                 self._persist_connection()
@@ -61,7 +61,7 @@ class PlexClient:
         if not (self._url and self._token):
             raise ValueError("Need either URL+token or token+server_name")
         # a shared server's owner publishes its addresses; only a LAN address gets the account token
-        if (self._server_name and not owned and self._token == self._account_token
+        if (self._server_name and not self._owned and self._token == self._account_token
                 and not account.is_lan_url(self._url)):
             raise ConnectionError(f"Could not reach '{self._server_name}' through plex.tv")
         logger.debug("Connecting directly to %s", self._url)
@@ -72,7 +72,7 @@ class PlexClient:
         self._persist_connection()
 
     def _persist_connection(self) -> None:
-        """Save the URL and server token this connection used back to config.json."""
+        """Save the URL and server token this connection used, and whether the account owns it."""
         if not self._server:
             return
 
@@ -83,7 +83,7 @@ class PlexClient:
         if not new_url or not new_token:
             return
 
-        if new_url == self._url and new_token == self._token:
+        if (new_url, new_token, self._owned) == (self._url, self._token, self.server_config.owned):
             return
 
         if new_url != self._url:
@@ -92,6 +92,7 @@ class PlexClient:
         if new_token != self._token:
             logger.info("Saved this server's own access token")
             self._token = new_token
+        self.server_config.owned = self._owned
 
         try:
             config = Config.load()
@@ -99,6 +100,7 @@ class PlexClient:
             if server:
                 server.url = self._url
                 server.token = self._token
+                server.owned = self._owned
                 config.save()
         except Exception as e:
             logger.warning("Could not save the new connection details to config.json: %s", e)

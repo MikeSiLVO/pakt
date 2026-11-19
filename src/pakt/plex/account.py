@@ -113,7 +113,7 @@ class DiscoveredServer:
         """Build this server's config.json entry, named after the server unless a name is given."""
         return ServerConfig(
             name=name or self.name, server_name=self.name, url=self.best_connection_url or "",
-            token=self.access_token, enabled=enabled,
+            token=self.access_token, owned=self.owned, enabled=enabled,
         )
 
 
